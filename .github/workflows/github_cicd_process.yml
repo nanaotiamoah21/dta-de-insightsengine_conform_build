@@ -1,0 +1,2443 @@
+name: Github ETL CICD
+
+env:
+
+# [ Declare general variables required for workflow ]
+  environment: ${{ vars.ENVIRONMENT }}
+  repo_name: ${{ github.event.repository.name }}
+  source_branch : ${{github.head_ref || github.ref_name}}
+  target_branch : ${{github.base_ref}}
+  pr_number : ${{ github.event.pull_request.number || github.event.issue.number }}
+  pr_title: ${{ github.event.pull_request.title }}
+  pr_url: ${{ github.event.pull_request.html_url }}
+  github_actor: ${{ github.actor }}
+  github_token: ${{ github.token }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  commit_id: ${{github.event.pull_request.head.sha}}
+  Event_Type: ${{github.event_name}}
+  fetch_depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}  
+  run_id: ${{github.run_id}}
+  event_name: ${{github.event_name}}
+  pre_change_commit: ${{ github.event.before }}
+  post_change_commit: ${{ github.event.after || github.event.pull_request.head.sha }}
+  repo_owner: ${{ github.event.repository.owner.login }}
+  repo_url: ${{ github.event.repository.url }}
+  pr_status: ${{ github.event.pull_request.state }}
+  pr_action: ${{ github.event.action }}
+  pr_author: ${{ github.event.pull_request.user.login }}
+  pr_owner: ${{ github.actor }}
+  pr_merged_status: ${{ github.event.pull_request.merged }}
+  pr_merged_by: ${{ github.event.pull_request.merged_by.login }}
+  pr_merged_tms: ${{ github.event.pull_request.merged_at }}
+  pr_merged_commit_id: ${{ github.event.pull_request.merge_commit_sha }}
+  github_audit_table: ${{vars.GITHUBAUDITTABLE}}
+  github_team_metadata_table: ${{vars.GITHUBTEAMMETADATATABLE}}
+  sendgrid_secret_name: ${{vars.SENDGRID_KV_SECRETKEY}}
+  reciever_mail: ${{vars.HF_RECIEVER_MAIL}}  
+
+# [ Azure Service Principal Credentials declared as secret for Non-Prod]
+  AZURE_CREDENTIALS_NON_PROD: ${{secrets.AZURE_CREDENTIALS_NON_PROD}}
+  CLINET_ID_NON_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['clientId']}}
+  CLINET_SECRET_NON_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['clientSecret']}}
+  SUBSCRIPTION_ID_NON_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['subscriptionId']}}
+  TENANT_ID : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['tenantId']}}
+
+# [ Azure Service Principal Credentials declared as secret for Prod ] 
+  AZURE_CREDENTIALS_PROD: ${{secrets.AZURE_CREDENTIALS_PROD}}
+  CLINET_ID_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_PROD)['clientId']}}
+  CLINET_SECRET_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_PROD)['clientSecret']}}
+  SUBSCRIPTION_ID_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_PROD)['subscriptionId']}}
+  
+# [ Declare repository variables to control various components during CICD run ]
+  AUDIT_CONTROLLER : ${{ fromJSON(vars.REPOSITORY_ACTIVITY_CONTROLLER)['audit_cicd']}}
+  FOD_CONTROLLER : ${{ fromJSON(vars.REPOSITORY_ACTIVITY_CONTROLLER)['fod']}}
+  TRUFFLEHOG_CONTROLLER : ${{ fromJSON(vars.REPOSITORY_ACTIVITY_CONTROLLER)['trufflehog']}}
+  SNYK_CONTROLLER : ${{ fromJSON(vars.REPOSITORY_ACTIVITY_CONTROLLER)['snyk']}}
+  SNYK_ORG_ID : ${{ fromJSON(vars.SNYK_ORGANIZATION_DETAILS)['snyk_org_id']}}
+  SNYK_ORG_NAME : ${{ fromJSON(vars.SNYK_ORGANIZATION_DETAILS)['snyk_org_name']}}
+  RUNNER_LABEL: ${{ vars.RUNNER_LABEL }}
+  
+# Controls when the workflow will start - trigger
+on:
+  push:
+    branches : 
+      - 'feature-*'
+    paths-ignore:
+      - .github/**
+      - prophecy/**  
+
+  pull_request:
+    types: 
+      - opened
+      - synchronize
+      - reopened
+      - closed
+    branches: 
+      - main
+    paths-ignore:
+      - .github/**
+
+  # Allows you to run this workflow manually from the actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+
+# Build Job
+  build:
+    name: Build 
+    # The type of runner that the job will run based on variable
+    runs-on : ${{ fromJSON(vars.RUNNER_LABEL) }}
+    if: (github.event_name == 'push' || github.event_name=='pull_request') && !(github.event.pull_request.merged == false && github.event.action == 'closed')
+    outputs:
+      REPO_SHORT_NAME: ${{ steps.repo.outputs.result }}
+    steps: 
+
+    # Step 1 - Login to Azure using Service Principal for Prod
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{env.AZURE_CREDENTIALS_PROD}}
+
+    # Step 2 - Checkout the repository with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth : ${fetch_depth}
+
+    # Step 3 - Get paramter details and store in variables
+    - name : Get repository , branch , pull req & additional parameter details
+      id : repo
+      run : |
+        echo "REPOSITORY_NAME=${repo_name}"        
+        ref=$(echo "${repo_name}" | grep -o "-" | wc -l)
+        REPO_SHORT_NAME=$(echo "${repo_name}" | cut -d "-" -f3-$((1+$ref)))
+        echo "REPOSITORY_SHORT_NAME : ${REPO_SHORT_NAME}"
+        echo "result=${REPO_SHORT_NAME}" >> "$GITHUB_OUTPUT"
+        echo "Source_NAME=${source_branch}"
+        echo "Target_NAME=${target_branch}"
+        echo "${{ github.event.pull_request.base.ref }}"     
+        echo "PR Status : ${{ github.event.pull_request.state}}"
+        echo "PR Action : ${{ github.event.action }}"
+        echo "PR Author : ${{ github.event.pull_request.user.login }}"
+        echo "Event Owner : ${{ github.actor }}"
+        echo "PR Merged Status : ${{ github.event.pull_request.merged }}"
+        echo "Event Name : ${{github.event_name}}"
+        echo "Source Branch : ${{github.head_ref || github.ref_name}}"
+        echo "Target Branch : ${{github.base_ref}}"
+        echo "PR Number : ${{ github.event.pull_request.number || github.event.issue.number }}"
+        echo "PR Title :${{ github.event.pull_request.title }}"
+        echo "PR URL : ${{ github.event.pull_request.html_url }}"
+        echo "Commit ID : ${{github.event.pull_request.head.sha}}"
+        echo "Fetch Depth : ${{ github.event_name == 'pull_request' && 2 || 0 }}"
+        echo "Pre Change Commit : ${{ github.event.before }}"
+        echo "Post Change Commit : ${{ github.event.after || github.event.pull_request.head.sha }}"
+        echo "Repo Name : ${{ github.event.repository.name }}"
+        echo "Repo Owner : ${{ github.event.repository.owner.login }}"
+        echo "Repo URL : ${{ github.event.repository.url }}"
+        echo "PR Merged By : ${{ github.event.pull_request.merged_by.login }}"
+        echo "PR Merged At : ${{ github.event.pull_request.merged_at }}"
+        echo "PR Merged Commit ID: ${{ github.event.pull_request.merge_commit_sha }}"
+        echo "Merged Commit ID : ${{ github.event.head_commit.id }}"
+        echo "Merge Count : ${{ steps.merge_count.outputs.merge_count }}"
+        
+        echo "PULL_NUMBER=$(echo "$GITHUB_REF" | awk -F / '{print $3}')" >> $GITHUB_ENV
+        echo "${{ env.PULL_NUMBER }}"
+        echo "${{ github.event.pull_request.number || github.event.issue.number }}"
+        echo "https://github.com/DigitalInnovation/${repo_name}/pull/${pr_number}"
+        echo "${{github.event.ref}}"
+        echo "Commit Checkpoint : v-$GITHUB_SHA"
+        echo "$GITHUB_SHA"
+        
+        echo "sha_short=$(git rev-parse --short "$GITHUB_SHA")" 
+        echo "branch=$(echo ${GITHUB_REF#refs/heads/})"
+
+
+    # Step 4 - Prod GEN KeyVault Dynamic Whitelist for GitHub hosted runner
+    - name : KeyVault Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG_CENTRAL}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}" --ip-address $agentIP
+
+    # Step 5 - Setup Python with required version
+    - name : Set up python
+      uses : actions/setup-python@v4
+      with :
+        python-version : ${{ vars.PYTHON_VERSION }}
+
+    # Step 6 - Install ODBC Driver Manager for GitHub Hosted Runner
+    - name : Install ODBC Driver Manager for GitHub Hosted Runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : |
+        sudo curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+        sudo curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
+        # optional: for bcp and sqlcmd
+        sudo ACCEPT_EULA=Y apt-get install -y mssql-tools
+        echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+        source ~/.bashrc
+        # optional: for unixODBC development headers
+        sudo apt-get install -y unixodbc-dev
+        python -m pip install pyodbc
+
+    # Step 7 - Install ODBC driver Manager for Self Hosted Runner
+    - name : Install ODBC Driver Manager for Self Hosted Runner
+      if : ${{ !contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : bash .github/scripts/odbc_driver_install.sh
+
+    # Step 8 - Install required python packages
+    - name : Install Python package
+      continue-on-error : false
+      run : |
+        pip install --upgrade pip
+        pip install requests
+        pip install jira
+        pip install pandas
+        pip install sendgrid
+
+    # Step 9 - Run validations for PR raised from feature branch
+    - name : PR Validation for feature branch
+      if : github.event_name == 'pull_request' && github.event.action != 'closed' && !startsWith(github.head_ref,'hf')
+      run : python ./.github/scripts/pr_validation_script.py
+      env :
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        sqldb_secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        jira_host_secret_name : ${{vars.JIRA_HOST}}
+        jira_token_secret_name : ${{vars.JIRA_PAT}}
+        workflow_name : 'github_cicd_process.yml'
+        PAT_GITHUB_SECRET_KEY : ${{vars.PAT_GITHUB_SECRET_KEY}}
+        github_api_version : ${{vars.GH_API_VERSION}}
+
+    # Step 10 - Run validations for PR raised from hotfix branch
+    - name : PR Validation for hotfix branch
+      if : github.event_name == 'pull_request' && github.event.action != 'closed' && (startsWith(github.head_ref,'hf'))
+      run : python ./.github/scripts/pr_validation_script_hotfix.py
+      env :
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        sqldb_secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        jira_host_secret_name : ${{vars.JIRA_HOST}}
+        jira_token_secret_name : ${{vars.JIRA_PAT}}
+        workflow_name : 'github_cicd_process.yml'
+        PAT_GITHUB_SECRET_KEY : ${{vars.PAT_GITHUB_SECRET_KEY}}
+        github_api_version : ${{vars.GH_API_VERSION}}
+
+    # - name: Run Semgrep Scan
+    #   if : github.event_name == 'pull_request' && github.event.action != 'closed'
+    #   #continue-on-error : true
+    #   uses: DigitalInnovation/semgrep-appsec-workflow/.github/actions/webapps@v2.1.9
+    #   with:
+    #     SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    #     SEMGREP_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+    #     SEMGREP_REPO_DISPLAY_NAME: ${{ github.repository }}
+    #     exclude-patterns: '.github/*'
+    #     fail-on: 'HIGH' 
+
+
+    # Step 11 - List requirement file changes (if any) to be used for SNYK validation
+    - name : Get changed file names for synk validation
+      if : github.event_name == 'pull_request' && github.event.action != 'closed' && env.SNYK_CONTROLLER == 'true'
+      id : changed_files
+      shell : bash
+      run : |
+        # Get the list of changed file names
+        echo "GitHub SHA: ${{ github.sha }}"
+        changed_files=$(git diff --diff-filter=d --name-only -r HEAD^1 HEAD | xargs)
+        echo "Following Files have been changed as part of the pull request"
+
+        req_files=()  # Initialize an empty array to store req files
+        ITER=1
+        for file in $changed_files; 
+        do
+          echo "  ${ITER}: $file"
+          # Check if the file matches the pattern "req*.txt"
+          if [[ "$file" == req*.txt ]]; then
+            req_files+=("$file")
+            echo "$req_files"
+          fi
+          ITER=$(expr $ITER + 1)
+        done
+
+        # Print all "req*.txt" files
+        if [ ${#req_files[@]} -gt 0 ]; then
+          echo "All requirements files found:" 
+          for req_file in "${req_files[@]}"; do
+            echo "$req_file"
+          done
+        else
+          echo "No requirements files found in the changes."
+          echo "requirements_present=false" >> $GITHUB_OUTPUT
+        fi
+
+        changed_files_commit=$(git diff --diff-filter=d --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)
+        echo "Following Files have been changed in the final commit"
+        echo "${changed_files_commit}"
+
+        # Set the req_files as an output
+        echo "file_names=${req_files[@]}" >> $GITHUB_OUTPUT
+        echo "requirements_present=true" >> $GITHUB_OUTPUT
+
+        for file in "${req_files[@]}"; do echo "$file" && echo "req_files=$req_files" >> $GITHUB_ENV; 
+        echo "req_files=${req_files[@]}" >> $GITHUB_ENV
+        done
+
+    # Step 12 - Retrieve snyk token and azure devops token from Prod Azure KV
+    - name : Get SNYK token
+      if : github.event_name == 'pull_request' && github.event.action != 'closed' && env.SNYK_CONTROLLER == 'true'
+      id : fetch_kv_secret
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SNYK_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "snyk_token=$temp" >> "$GITHUB_OUTPUT"
+        
+        temp_devops=$(az keyvault secret show --name ${{vars.DEVOPS_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}} --query value -o tsv)
+        echo "::add-mask::$temp_devops"
+        echo "devops_token=$temp_devops" >> "$GITHUB_OUTPUT"
+
+    # Step 13 - If any requirement file changes are present, then install the requirement files
+    - name : Install Dependencies from req.txt files
+      if : steps.changed_files.outputs.requirements_present == 'true' && env.SNYK_CONTROLLER == 'true'
+      run : |
+        for x in ${{ steps.changed_files.outputs.file_names }}; do
+        echo "***installing ${x} ***" 
+        pip install -r "${{ github.workspace }}/${x}" --extra-index-url="https://{{steps.fetch_kv_secret.outputs.devops_token}}@pkgs.dev.azure.com/dta-devops/_packaging/dta-libraries/pypi/simple/"
+        done;
+
+    # Step 14 - Start SNYK scan for 3rd party vulnerabilities and upload in SNYK API
+    - name : Snyk SCA Scanning
+      if : steps.changed_files.outputs.requirements_present == 'true' && github.event_name == 'pull_request' && github.event.action != 'closed' && env.SNYK_CONTROLLER == 'true'
+      working-directory : ${{ github.workspace }}
+      continue-on-error : true
+      run : |
+        echo "----------Download Latest Snyk CLI-----------"
+        curl -Lo ./snyk "https://github.com/snyk/snyk/releases/download/v1.1159.0/snyk-linux"
+        chmod +x snyk
+        ls -lrt
+        echo "----------Authenticating Snyk-----------"
+        ./snyk auth ${{steps.fetch_kv_secret.outputs.snyk_token}}
+        
+        # Loop through the req.txt files and monitor them separately
+        for req_file in $(find . -name "*req*.txt"); do
+          echo "looping through all req text files"
+          req_filename=$(basename "$req_file")
+          echo "-------Requirement file name is  $req_filename ---------------"
+          project_name="${req_filename%.txt}"
+          echo "----------Project Name is $project_name--------------"
+          echo "----------Snyk Monitor for $req_filename-----------"
+          SNYK_PROJECT_NAME="${{ github.event.repository.name }}/$project_name"
+          ./snyk monitor --command=python3 --file="$req_filename" --package-manager=pip --project-name="$SNYK_PROJECT_NAME" || true
+          echo "----------Snyk Scanning for $req_filename-----------"
+          ./snyk test --command=python3 --file="$req_filename" --package-manager=pip || true
+          echo "-----------Snyk Scanning Complete for $req_filename-----------"
+        done
+
+    # Step 15 - SNYK SCAN validation and upload validation result in PR comment
+    - name : Snyk SCA Validation
+      if : steps.changed_files.outputs.requirements_present == 'true' && github.event_name == 'pull_request' && github.event.action!= 'closed' && env.SNYK_CONTROLLER == 'true'
+      working-directory : ${{ github.workspace }}
+      run : |
+        echo "Running Snyk SCA Validation"
+        python ./.github/scripts/snyk_api_validation.py
+      env :
+        snyk_token : ${{steps.fetch_kv_secret.outputs.snyk_token}}
+        snyk_org : ${{env.SNYK_ORG_ID}}
+        snyk_org_name : ${{env.SNYK_ORG_NAME}}
+        github_token : ${{ env.GH_TOKEN }}
+        req_files : ${{ env.req_files }}
+        Fetch_Depth : ${{ github.event_name == 'pull_request' && 2 || 0 }}
+
+    # Step 16 - SNYK error validation and fail workflow in case of validation issues
+    - name : Snyk Error Validation
+      if : steps.changed_files.outputs.requirements_present == 'true' && github.event_name == 'pull_request' && github.event.action!= 'closed' && env.SNYK_CONTROLLER == 'true'
+      run : |
+        echo "starting critical and high scan"
+        echo "$SNYK_CRITICAL"
+        echo "$SNYK_HIGH"
+        CRITICAL=$( echo "$SNYK_CRITICAL" )
+        HIGH=$( echo "$SNYK_HIGH" )
+        if [ $CRITICAL -gt 0 ] || [ $HIGH -gt 0]
+        then
+        echo "##[error] In total SNYK found $CRITICAL critical Issues and $HIGH Issues"
+        exit 1
+        else
+          echo "PASSED"
+        fi
+      continue-on-error : true
+
+    # Step 17 - Get change file details for the respective github event i.e. push or pull-request
+    - name : Get changed files details
+      id : changed-files
+      shell : bash
+      run : |
+        echo "REPOSITORY_NAME=${repo_name}"
+        echo "Source Branch=${source_branch}"
+        echo "Target Branch=${target_branch}"
+        echo "Pull Request Number=${pr_number}"
+        echo "Commit ID=${commit_id}"
+        echo "Event Type=${Event_Type}"
+        echo "Fetch Depth=${fetch_depth}"
+        echo "Running for pull request"
+        changed_files=$(git diff --diff-filter=d --name-only -r HEAD^1 HEAD | xargs)
+        echo "files=${changed_files}" >> $GITHUB_OUTPUT
+        echo "Following Files have been changed as part of the pull request"
+                
+        ITER=1
+        for file in ${changed_files}; 
+          do
+            echo "  ${ITER}: " "$file"
+            ITER=$(expr $ITER + 1)
+          done
+        echo "Running for ${{github.event_name}} event"
+
+        # get changed file details from github commit tree using git diff
+        changed_files=$(git diff --diff-filter=d --name-only -r HEAD^1 HEAD | xargs) 
+        deleted_files=$(git diff --diff-filter=D --name-only -r HEAD^1 HEAD | xargs)
+        new_files=$(git diff --diff-filter=A --name-only -r HEAD^1 HEAD | xargs)
+        updated_files=$(git diff --diff-filter=M --name-only -r HEAD^1 HEAD | xargs)
+
+        echo "changed_files=${changed_files}" >> $GITHUB_OUTPUT
+        echo "changed_files=${changed_files}" >> $GITHUB_ENV
+        echo "deleted_files=${deleted_files}" >> $GITHUB_ENV
+        echo "new_files=${new_files}" >> $GITHUB_ENV
+        echo "updated_files=${updated_files}" >> $GITHUB_ENV
+
+        # Check if prophecy pipelines present as changed files, 
+        prophecy_pipelines=false
+        substring_to_remove="prophecy/pipelines/"
+        pipelinelist=()
+        p_pipelines=""
+        echo "Following Files have been changed in the final commit : "
+        for file in ${changed_files}; do
+        if [[ "$file" == prophecy/pipelines* ]]; then
+        #get pipeline path prophecy/pipelines/somepipelinename
+        pipelinenamebasepath=$(echo "$file" | awk -F'/' '{print $1"/"$2"/"$3}')
+        output="${pipelinenamebasepath//$substring_to_remove/}"
+        echo "$output"
+        if ! [[ ${pipelinelist[@]} =~ $output ]]
+        then
+        #element not exist
+        pipelinelist+=("$output")
+        if [ -z "$p_pipelines" ]; then
+        p_pipelines="$output"
+        else
+        p_pipelines="$p_pipelines, $output"
+        fi
+        fi
+        prophecy_pipelines=true
+        fi
+        #echo "$file"
+        done
+        echo "p_pipelines=${p_pipelines}" >> $GITHUB_ENV
+        
+        # setting prophecy pipelines status in github output
+        echo "Changed prophecy pipelines status:"
+        echo "$prophecy_pipelines"
+        echo "prophecy_pipelines=${prophecy_pipelines}" >> $GITHUB_ENV
+        echo ""        
+        echo "Following Files have been Newly Added in the final commit : "
+        for file in ${new_files}; do
+        echo "$file"
+        done
+        echo ""
+        echo "Following Files have been Updated in the final commit : "
+        for file in ${updated_files}; do
+        echo "$file"
+        done
+        echo ""
+        echo "Following Files have been Deleted in the final commit : "
+        for file in ${deleted_files}; do
+        echo "$file"
+        done
+
+
+    #Step 18.0 -  Wheel File Generation
+    - name: Set up JDK 11
+      if : env.prophecy_pipelines == 'true'
+      uses: actions/setup-java@v3
+      with:
+        java-version: "11"
+        distribution: "adopt"
+
+    # Install all python dependenciess
+    # prophecy-libs not included here because prophecy-build-tool takes care of it by reading each pipeline's setup.py
+    - name: Install dependencies
+      if : env.prophecy_pipelines == 'true'
+      run: |
+        #python3 -m pip install --upgrade pip
+        pip3 install build pytest wheel pytest-html pyspark==3.3.0  prophecy-build-tool
+    - name: Run PBT validate
+      if : env.prophecy_pipelines == 'true'
+      run: pbt validate --path prophecy
+
+    # PBT build will build recently modified wheel file in github runner instance
+    - name: Run PBT build
+      if : env.prophecy_pipelines == 'true'
+      run: |
+          pbt build --pipelines "${{env.p_pipelines}}" --path prophecy   
+
+    # PBT test will test recently modified wheel file in github runner instance
+    - name: Run PBT test
+      if : env.prophecy_pipelines == 'true'
+      continue-on-error : true
+      run: pbt test --pipelines "${{env.p_pipelines}}" --path prophecy
+
+    # Validate PBT Testing
+    - name : PBT Test Validation
+      if : (env.new_files != '' || env.updated_files !='' || env.deleted_files != '') && (github.event_name == 'pull_request' || github.event.pull_request.merged == true) && (env.prophecy_pipelines == 'true')
+      run : | 
+        runlog=$(python ./.github/scripts/pbt_test_validate.py)
+        echo "$runlog"
+      env :
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+        github_api_version : ${{vars.GH_API_VERSION}}
+        p_pipelines : ${{env.p_pipelines}}      
+        PAT_GITHUB_SECRET_KEY : ${{vars.PAT_GITHUB_SECRET_KEY}}
+
+    # Step 19 - Download changed files in workspace under changed_files folder
+    - name : Download_Changed_Files
+      shell : bash
+      run : |
+        mkdir changed_files
+        for file in ${{steps.changed-files.outputs.files}}; do
+        cd ${{github.workspace}}
+        directory=$(dirname "$file")
+        mkdir -p changed_files/$directory 
+        cp $file ${{github.workspace}}/changed_files/$file || true
+        done
+        if [[ "${{env.prophecy_pipelines}}" == 'true' ]]; then
+        for dir in ${{github.workspace}}/changed_files/prophecy/pipelines/*/; do 
+        pipelinename=$(basename "$dir");
+        ls prophecy/pipelines/${pipelinename}/code/dist/*.whl;
+        cd ${{github.workspace}}
+        directory=$(dirname "$file")
+        mkdir -p changed_files/$directory
+        cp -r ./prophecy/pipelines/${pipelinename}/code/dist/ ${{github.workspace}}/changed_files/prophecy/pipelines/${pipelinename}/code/dist/;
+        ls ${{github.workspace}}/changed_files/prophecy/pipelines/${pipelinename}/code/dist/
+        done
+        fi
+
+    # Step 20 - Publish the artifacts in github workflow run for reference
+    - name : Publish Artifacts
+      uses : actions/upload-artifact@v4
+      with : 
+        name : assets-for-download
+        path : ${{github.workspace}}/changed_files/
+        retention-days : 30 # By default Artifacts are retained for 90 days. The retention period must be between 1 and 90 inclusive.
+ 
+    
+    # Step 21 - Insert into Audit table only in case of pull-request trigger and there is file change present
+    - name : Audit Info Insertion
+      if : (env.new_files != '' || env.updated_files !='' || env.deleted_files != '') && (github.event_name == 'pull_request' || github.event.pull_request.merged == true)
+      run : | 
+        python ./.github/scripts/audit_insert.py
+      env :
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+        github_api_version : ${{vars.GH_API_VERSION}}
+        jira_host_secret_name : ${{vars.JIRA_HOST}}
+        jira_token_secret_name : ${{vars.JIRA_PAT}}
+        PAT_GITHUB_SECRET_KEY : ${{vars.PAT_GITHUB_SECRET_KEY}}
+        prophecy_pipelines : ${{env.prophecy_pipelines}}
+
+    # Step 22 - Cencel existing run for this workflow for the same head branch
+    - name : Cancel previously waiting run raised from existing PR
+      if : github.event_name == 'pull_request'
+      run : python ./.github/scripts/cancel_historic_runs.py
+      env :
+        repo_name : ${{env.repo_name}}
+        github_pat : ${{ secrets.GITHUB_TOKEN }}
+        workflow_name : 'github_cicd_process.yml'
+
+    # Step 23 - Prod GEN KeyVault Dynamic Whitelist removal for GitHub hosted runner
+    - name : KeyVault Whitelist removal for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG_CENTRAL}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}" --ip-address $agentIP
+
+    # Step 24 - Azure Logout
+    - name : Azure logout
+      run : |
+        az logout
+      if : always()
+
+# NDEV Deployment
+  deploy-to-NDEV:
+    name : Deploy to NDEV
+    if: github.event.action != 'closed' && !startsWith(github.head_ref,'hf')
+    needs: [build]
+    # The type of runner that the job will run on based on variable
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment : 
+      name : NDEV
+      #url : 'http://ndev.myapp.com'
+    env:
+      AZURE_STORAGE_AUTH_MODE: login
+      AZURE_CORE_OUTPUT: none
+    steps: 
+
+    # Step 1 - Login to Azure using Non Prod service principal
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{env.AZURE_CREDENTIALS_NON_PROD}}
+
+    # Step 2 - Checkout the repository with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth : ${fetch_depth}     
+
+    # Step 3 - Download the artifacts from the build job
+    - name : Download Artifacts
+      uses : actions/download-artifact@v4
+      with :
+        path : published_package
+
+    # Step 4 - Initialize variable to be used later on
+    - name : Initialize variable
+      id : init
+      shell : bash
+      run : |
+        echo "DATABRICKS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_DATABRICKS']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_CONFIG_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_CONFIG']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_JMS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_JMS']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SCHEMA_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SCHEMA']}}" >> $GITHUB_OUTPUT
+        echo "ENV_NAME=nDEV" >> $GITHUB_ENV
+
+        # Non Prod JMS parameters
+        echo "MQ_HOST=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['MQ_HOST']}}" >> $GITHUB_ENV
+        echo "MQ_CHANNEL=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['MQ_CHANNEL']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_CONFLUENT=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['KAFKA_SERVERS_CONFLUENT']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_ENTERPRISE=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['KAFKA_SERVERS_ENTERPRISE']}}" >> $GITHUB_ENV
+        echo "K8S_CLUSTER=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_CLUSTER']}}" >> $GITHUB_ENV
+        echo "K8S_NAMESPACE=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_NAMESPACE']}}" >> $GITHUB_ENV
+        echo "LANDING_ACCOUNT=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['LANDING_ACCOUNT']}}" >> $GITHUB_ENV
+        echo "K8S_URL=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_URL']}}" >> $GITHUB_ENV
+        echo "K8S_SECRET=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_SECRET']}}" >> $GITHUB_ENV
+
+    # Step 5 - Storage Account Dynamic Whitelist for GitHub hosted runner
+    - name : Storage Account Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        write-output "Network rule list - "
+        az storage account network-rule list --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+        az storage account network-rule add --resource-group ${{vars.AZURE_RESOURCE_GROUP}} --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP
+
+    # Step 6 - DBK Kayvault Dynamic Whitelist for GitHub hosted runner
+    - name : KeyVault Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+          $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+          write-output "GitHub Agent IP address '$agentIP'"
+          az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 7.0 - Deploy Wheel files if present using Az CLI
+    - name : Deploy Wheel files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/prophecy/pipelines/ ]] ; then
+          ls
+          for dir in ./published_package/assets-for-download/prophecy/pipelines/*/; do prophecy_pipeline=$(basename "$dir"); ls ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/*.whl; az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/prophecy_executables -s ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/   --overwrite  --auth-mode login; done            
+        else
+          echo "No Wheel file changes"
+        fi	
+   
+
+    # Step 7 - Deploy config files if present using Az CLI
+    - name : Deploy config files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/configs/ ]] ; then
+          ls
+          az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/configs -s ./published_package/assets-for-download/configs  --overwrite  --auth-mode login
+        else
+          echo "No config file changes"
+        fi
+
+    # Step 8 - Deploy schema files if present using Az CLI
+    - name : Deploy schema files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_SCHEMA_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/schemas/ ]] ; then
+          ls
+          az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/schemas -s ./published_package/assets-for-download/schemas --overwrite  --auth-mode login
+        else
+          echo "No schema file changes"
+        fi
+
+    # Step 9 - Deploy jms config files if present using Az CLI
+    - name : Deploy jms config files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+          ls  
+          az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/jms -s ./published_package/assets-for-download/jms --overwrite  --auth-mode login  
+        else
+          echo "No jms config file changes"
+        fi
+
+    # Step 10 - Setup Python with required version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version : ${{ vars.PYTHON_VERSION }}
+
+    # Step 11 - Install required python packages
+    - name : Install python packages
+      run : |
+        python -m pip install --upgrade pip
+        python -m pip install PyYAML
+        echo "DATABRICKS_HOST_URL_NDEV : ${{ vars.DATABRICKS_HOST_URL }}"
+
+    # Step 12 - Get databricks token from Azure KeyVault
+    - name : Get databricks token
+      if : steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZ_DBX_KV_SECRET_KEY}} --vault-name ${{vars.AZ_DBX_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id : dbx_secret
+
+    # Step 13 - Databricks CLI setup using databricks token
+    - name : Databricks CLI setup using databricks token
+      if : steps.init.outputs.DATABRICKS_CONTROLLER == 'true'
+      run : |
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0"
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{steps.dbx_secret.outputs.dbx_token}}
+        jobs-api-version = 2.1 
+        EOF
+
+    # Step 14 - Deploy only changed notebooks in databricks workspace using databricks-cli
+    - name : Databricks - Deploy notebooks to workspace
+      if: steps.init.outputs.DATABRICKS_CONTROLLER == 'true'
+      run: |
+        if [[ -d ./published_package/assets-for-download/notebooks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/notebooks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}} --overwrite
+        else
+          echo "No Databricks Notebook exists in this commit"
+        fi
+
+    # Step 15 - Deploy ADLS SQL script in databricks workspace using databricks-cli
+    - name : Databricks - Deploy DDL scripts to workspace
+      if : steps.init.outputs.DATABRICKS_CONTROLLER == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/databricks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/sql/databricks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks  --overwrite
+        else
+          echo "No Databricks Notebook exists in this commit"
+        fi
+
+    # Step 16 - Check if JMS deployment required in this environment and if jms config changes present
+    - name : Set jms status flag
+      id : jms_status
+      if : ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}} == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+          echo "DEPLOY_JMS_CONTROLLER = ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}}" 
+          echo "jms_deployment_status=true" >> $GITHUB_OUTPUT
+          output_string=""
+          append=","
+          
+          for file in ./published_package/assets-for-download/jms/*; do
+            echo "Processing $file"
+            filename=$(basename -- "$file")
+            echo "filename=$filename"
+            prefix_str="./jms/"
+            prefix_str+="$filename"
+            output_string+="$prefix_str$append"
+            done
+          
+          result_string="${output_string%,}"
+          echo "jms config=$result_string"
+          echo "result_string=$result_string" >> "$GITHUB_OUTPUT"
+        else
+          echo "No jms deployment"
+          echo "jms_deployment_status=false"
+          echo "DEPLOY_JMS_CONTROLLER = ${{env.DEPLOY_JMS_CONTROLLER}}"
+          echo "jms_deployment_status=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 17 - Generate values.yaml using template and provided jms configs
+    - name : python script to generate jms values
+      if :  ${{ steps.jms_status.outputs.jms_deployment_status == 'true'  && steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true' }}
+      run : python ./.github/scripts/trigger_jms_deployment.py
+      env :
+        TENANT_ID : ${{env.TENANT_ID}}
+        SUBSCRIPTION_ID : ${{env.SUBSCRIPTION_ID_NON_PROD}}
+        ENVIRONMENT_SHORT : ${{env.ENV_NAME}}
+        JMS_CONFIG : ${{steps.jms_status.outputs.result_string}}
+        MQ_HOST : ${{env.MQ_HOST}}
+        MQ_CHANNEL : ${{env.MQ_CHANNEL}}
+        KAFKA_SERVERS_CONFLUENT : ${{env.KAFKA_SERVERS_CONFLUENT}}
+        KAFKA_SERVERS_ENTERPRISE : ${{env.KAFKA_SERVERS_ENTERPRISE}}
+        K8S_CLUSTER : ${{env.K8S_CLUSTER}}
+        K8S_NAMESPACE : ${{env.K8S_NAMESPACE}}
+        LANDING_ACCOUNT : ${{env.LANDING_ACCOUNT}}
+        K8S_URL : ${{env.K8S_URL}}
+        K8S_SECRET : ${{env.K8S_SECRET}}
+        authorization_pat : ${{ env.GH_TOKEN }}
+        repo_name : ${{ env.repo_name }}
+        ref_branch : ${{github.head_ref || github.ref_name}}
+
+    # Step 18 - Storage Account Dynamic Whitelist removal for GitHub hosted runner
+    - name : Storage Account Whitelist removal for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az storage account network-rule remove --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+
+    # Step 19 - DBK Keyvault Dynamic Whitelist removal for GitHub hosted runner
+    - name : Keyvault Whitelist removal for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 20 - Azure Logout
+    - name : Azure logout
+      run : |
+        az logout
+      if : always()
+
+# SIT Deployment
+  deploy-to-SIT:
+    name : Deploy to SIT
+    # Runs for PR event only
+    if : github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.action!='closed'
+    # Depends on ndev deployment
+    needs: [ build,deploy-to-NDEV ]
+    # Runs on configurable runner based on repo variable
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment : 
+      name : SIT
+      #url : http://sit.myapp.com'
+    env:
+      AZURE_STORAGE_AUTH_MODE: login
+      AZURE_CORE_OUTPUT: none
+    outputs:
+      script_folder_exists: ${{ steps.scripts.outputs.temp }} 
+      dbx_notebook : ${{ steps.scripts.outputs.dbx_notebook }}
+    steps: 
+
+    # Step 1 - Login to Azure using Non Prod service principal
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{secrets.AZURE_CREDENTIALS_NON_PROD}}
+
+    # Step 2 - Checkout the repository with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth : ${fetch_depth}
+
+    # Step 3 - Download the artifacts from the build job
+    - name : Download Artifacts
+      uses : actions/download-artifact@v4
+      with :
+        path : published_package
+
+    # Step 4 - Initialize variable to be used later on
+    - name : Initialize variable
+      id : init
+      shell : bash
+      run : |
+        echo "DATABRICKS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_DATABRICKS']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_CONFIG_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_CONFIG']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SCHEMA_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SCHEMA']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_JMS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_JMS']}}" >> $GITHUB_OUTPUT
+        echo "DBX_AUTOMATED_DDL_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_AUTOMATED_DDL_IN_DBX']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_AZSQL=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_AZURESQL']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SYNAPSE=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SYNAPSE']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SYNAPSE_02_INSTANCE=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SYNAPSE_02_INSTANCE']}}" >> $GITHUB_OUTPUT
+        echo "ENV_NAME=SIT" >> $GITHUB_ENV
+
+        # Non Prod JMS parameters
+        echo "MQ_HOST=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['MQ_HOST']}}" >> $GITHUB_ENV
+        echo "MQ_CHANNEL=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['MQ_CHANNEL']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_CONFLUENT=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['KAFKA_SERVERS_CONFLUENT']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_ENTERPRISE=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['KAFKA_SERVERS_ENTERPRISE']}}" >> $GITHUB_ENV
+        echo "K8S_CLUSTER=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_CLUSTER']}}" >> $GITHUB_ENV
+        echo "K8S_NAMESPACE=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_NAMESPACE']}}" >> $GITHUB_ENV
+        echo "LANDING_ACCOUNT=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['LANDING_ACCOUNT']}}" >> $GITHUB_ENV
+        echo "K8S_URL=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_URL']}}" >> $GITHUB_ENV
+        echo "K8S_SECRET=${{ fromJSON(vars.JMS_DEPLOYMENT_NON_PROD)['K8S_SECRET']}}" >> $GITHUB_ENV
+
+    # Step 5 - Storage Account Dynamic Whitelist for GitHub hosted runner
+    - name : Storage Account Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        write-output "Network rule list - "
+        az storage account network-rule list --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+        az storage account network-rule add --resource-group ${{vars.AZURE_RESOURCE_GROUP}} --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP
+
+    # Step 6 - GEN and DBK Kayvault Dynamic Whitelist for GitHub hosted runner
+    - name : KeyVault Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 7.0 - Deploy Wheel files if present using Az CLI
+    - name : Deploy Wheel files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/prophecy/pipelines/ ]] ; then
+          ls
+          for dir in ./published_package/assets-for-download/prophecy/pipelines/*/; do prophecy_pipeline=$(basename "$dir"); ls ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/*.whl; az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/prophecy_executables -s ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/   --overwrite  --auth-mode login; done            
+        else
+          echo "No Wheel file changes"
+        fi	
+
+    # Step 7 - Deploy config files if present using Az CLI
+    - name : Deploy config files to azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/configs/ ]] ; then
+          ls
+          az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/configs -s ./published_package/assets-for-download/configs --overwrite  --auth-mode login
+        else
+          echo "No Config file changes"
+        fi
+
+    # Step 8 - Deploy schema files if present using Az CLI
+    - name : Deploy schema files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_SCHEMA_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/schemas/ ]] ; then
+          ls
+          az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/schemas -s ./published_package/assets-for-download/schemas --overwrite  --auth-mode login 
+        else
+          echo "No schema file changes"
+        fi
+
+    # Step 9 - Deploy jms config files if present using Az CLI
+    - name : Deploy jms config files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true'
+      shell : bash
+      run : |
+        if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+          ls
+          az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/jms -s ./published_package/assets-for-download/jms --overwrite  --auth-mode login 
+        else
+          echo "No jms config file changes"
+        fi
+
+    # Step 10 - Setup Python with required version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version : ${{ vars.PYTHON_VERSION }}
+
+    # Step 11 - Install ODBC Driver Manager for GitHub Hosted Runner
+    - name : Install ODBC Driver Manager for GitHub Hosted Runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : |
+        sudo curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+        sudo curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
+        # optional: for bcp and sqlcmd
+        sudo ACCEPT_EULA=Y apt-get install -y mssql-tools
+        echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+        source ~/.bashrc
+        # optional: for unixODBC development headers
+        sudo apt-get install -y unixodbc-dev
+        python -m pip install pyodbc
+
+    # Step 12 - Install ODBC Driver Manager for Self Hosted Runner
+    - name : Install ODBC Driver Manager for Self Hosted Runner
+      if : ${{ !contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : bash .github/scripts/odbc_driver_install.sh
+
+    # Step 13 - Install required python packages
+    - name : Install python packages
+      continue-on-error : false
+      run : |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    # Step 14 - Get databricks token from Azure KeyVault
+    - name : Get databricks token
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZ_DBX_KV_SECRET_KEY}} --vault-name ${{vars.AZ_DBX_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id : dbx_secret
+
+    # Step 15 - Databricks CLI setup using databricks token
+    - name : Databricks CLI setup to connect az KeyVault
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0"
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{steps.dbx_secret.outputs.dbx_token}} 
+        jobs-api-version = 2.1 
+        EOF
+
+    # Step 16 - Deploy only changed notebooks in databricks workspace using databricks-cli
+    - name : Databricks - Deploy notebooks to workspace
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/notebooks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/notebooks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}  --overwrite
+        else
+          echo "No Databricks Notebook exists in this commit"
+        fi
+
+    # Step 17 - Deploy ADLS SQL script if present in databricks workspace using databricks-cli
+    - name : Databricks - Deploy DDL scripts to workspace
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      id : scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/databricks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/sql/databricks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks  --overwrite
+          echo "temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/databricks/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "dbx_notebook=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "dbx_notebook=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No Databricks Notebook exists in this commit"
+          echo "temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 18 - Check if JMS deployment required in this environment and if jms config changes present
+    - name : Set jms status flag
+      id : jms_status
+      if :  ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}} == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+          echo "DEPLOY_JMS_CONTROLLER = ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}}" 
+          echo "jms_deployment_status=true" >> $GITHUB_OUTPUT
+          output_string=""
+          append=","
+          
+          for file in ./published_package/assets-for-download/jms/*; do
+            echo "Processing $file"
+            filename=$(basename -- "$file")
+            echo "filename=$filename"
+            prefix_str="./jms/"
+            prefix_str+="$filename"
+            output_string+="$prefix_str$append"
+            done
+          
+          result_string="${output_string%,}"
+          echo "jms config=$result_string"
+          echo "result_string=$result_string" >> "$GITHUB_OUTPUT"
+        else
+          echo "No jms deployment"
+          echo "jms_deployment_status=false"
+          echo "DEPLOY_JMS_CONTROLLER = ${{env.DEPLOY_JMS_CONTROLLER}}"
+          echo "jms_deployment_status=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 19 - Generate values.yaml using template and provided jms configs
+    - name : Python script to generate jms values
+      if :  ${{ steps.jms_status.outputs.jms_deployment_status == 'true'  && steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true' }}
+      run : python ./.github/scripts/trigger_jms_deployment.py
+      env :
+        TENANT_ID : ${{env.TENANT_ID}}
+        SUBSCRIPTION_ID : ${{env.SUBSCRIPTION_ID_NON_PROD}}
+        ENVIRONMENT_SHORT : ${{env.ENV_NAME}}
+        JMS_CONFIG : ${{steps.jms_status.outputs.result_string}}
+        MQ_HOST : ${{env.MQ_HOST}}
+        MQ_CHANNEL : ${{env.MQ_CHANNEL}}
+        KAFKA_SERVERS_CONFLUENT : ${{env.KAFKA_SERVERS_CONFLUENT}}
+        KAFKA_SERVERS_ENTERPRISE : ${{env.KAFKA_SERVERS_ENTERPRISE}}
+        K8S_CLUSTER : ${{env.K8S_CLUSTER}}
+        K8S_NAMESPACE : ${{env.K8S_NAMESPACE}}
+        LANDING_ACCOUNT : ${{env.LANDING_ACCOUNT}}
+        K8S_URL : ${{env.K8S_URL}}
+        K8S_SECRET : ${{env.K8S_SECRET}}
+        authorization_pat : ${{ env.GH_TOKEN }}
+        repo_name : ${{ env.repo_name }}
+        ref_branch : ${{github.head_ref || github.ref_name}}
+
+    # Step 20 - Identify SQL scripts (if any) in current PR for AzSQLDB deployment
+    - name : Identify SQL scripts for AzSQLDB deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_AZSQL  == 'true'
+      id : azsqldb_scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/azsqldb/ ]] ; then
+          echo "sql_temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/azsqldb/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done;
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "azsqldb_script=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "azsqldb_script=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No AzSQL DB script exists in this commit"
+          echo "sql_temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 21 - Get AzSQL DB connection token from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get AzSQL DB connection token
+      continue-on-error : true 
+      if : ${{ steps.azsqldb_scripts.outputs.sql_temp == 'true' && steps.init.outputs.DEPLOY_AZSQL  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZSQLDB_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "azsql_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/sit/g' ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+        cat ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+      id : azsql_secret
+
+    # Step 22 - Run AzSQL script in AzSQL DB based on retrieved connection token
+    - name : AzSQLDB automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_azsqldb_deployment
+      continue-on-error : true
+      if : ${{ steps.azsqldb_scripts.outputs.sql_temp == 'true' && steps.init.outputs.DEPLOY_AZSQL  == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.azsql_secret.outputs.azsql_token}}
+        path : ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+
+    # Step 23 - Identify SQL scripts (if any) in current PR for Synapse deployment
+    - name : Identify SQL scripts for Synapse deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_SYNAPSE  == 'true'
+      id : synapse_scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/synapse/ ]] ; then
+          echo "synapse_temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/synapse/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "synapse_script=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "synapse_script=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No synapse script exists in this commit"
+          echo "synapse_temp=false" >> $GITHUB_OUTPUT
+        fi
+        
+     
+    # Step 24 - Get Synapse connection token from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get Synapse connection token
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts.outputs.synapse_temp == 'true' && steps.init.outputs.DEPLOY_SYNAPSE  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SYNAPSE_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/sit/g' ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+        cat ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+      id : synapse_secret
+
+    # Step 25 - Run SQL script in Synapse based on retrieved connection token
+    - name : Synapse automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_synapse_deployment
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts.outputs.synapse_temp == 'true' && steps.init.outputs.DEPLOY_SYNAPSE == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.synapse_secret.outputs.synapse_token}}
+        path : ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+        
+
+    # Step 23.1 - Identify SQL scripts (if any) in current PR for Synapse 02 instance deployment
+    - name : Identify SQL scripts for Synapse 02 instance deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE  == 'true'
+      id : synapse_scripts_02_instance
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/synapse_02_instance/ ]] ; then
+          echo "synapse_temp_02=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/synapse_02_instance/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "synapse_script_02_instance=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "synapse_script_02_instance=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No synapse script exists in this commit"
+          echo "synapse_temp_02=false" >> $GITHUB_OUTPUT
+        fi
+
+
+    # Step 24.1 - Get Synapse connection token(for 02 instance) from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get connection token for synapse 02 instance (synapse managed)
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts_02_instance.outputs.synapse_temp_02 == 'true' && steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SYNAPSE_KV_SECRETKEY_02_INSTANCE}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/sit/g' ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+        cat ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+      id : synapse_secret_02_instance
+
+    # Step 25.1 - Run SQL script in Synapse based on retrieved connection token
+    - name : Synapse(02) managed instance automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_synapse_deployment_02_instance
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts_02_instance.outputs.synapse_temp_02 == 'true' && steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.synapse_secret_02_instance.outputs.synapse_token}}
+        path : ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+
+
+    # Step 26 - Run SQL script in Databricks using databricks notebook run action 
+    - name : Databricks Execution [ DDL script automated run ] ******** validation required  ********
+      id : ddl_dbx_deployment
+      continue-on-error : true  
+      if : ${{ steps.scripts.outputs.temp == 'true' && steps.init.outputs.DATABRICKS_CONTROLLER  == 'true' && steps.init.outputs.DBX_AUTOMATED_DDL_CONTROLLER  == 'true' }}
+      uses : databricks/run-notebook@v0
+      with :
+        workspace-notebook-path : /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks/${{ steps.scripts.outputs.dbx_notebook }}
+        databricks-host : ${{ vars.DATABRICKS_HOST_URL }}
+        databricks-token : ${{steps.dbx_secret.outputs.dbx_token}}
+        notebook-params-json : "[{\"key\":\"env\",\"value\":\"sit\"}]"
+        timeout-seconds : ${{vars.DBX_PROCESS_TIMEOUT}}
+        run-name : "https://github.com/DigitalInnovation/${{env.repo_name}} : ${{ steps.scripts.outputs.dbx_notebook }}"
+        new-cluster-json: >
+          {
+            "num_workers": ${{vars.DBX_WORKER_COUNT}},
+            "spark_version": "${{vars.DBX_RUNTIME_VERSION}}",
+            "node_type_id": "${{vars.DBX_NODE_TYPE}}",
+            "driver_node_type_id": "${{vars.DBX_NODE_TYPE}}",
+            "init_scripts": [
+              {
+                "${{vars.DBX_INIT_SCRIPT_PLACEHOLDER}}": {
+                  "destination": "${{vars.INIT_SCRIPT}}"
+                }
+              }
+            ]
+          }
+      timeout-minutes: 30
+    # Step 27 - Storage Account Dynamic Whitelist removal for GitHub hosted runner
+    - name : Storage Account Whitelist removal for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az storage account network-rule remove --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+
+    # Step 28 - GEN and DBK Keyvault Dynamic Whitelist removal for GitHub hosted runner
+    - name : Keyvault Whitelist removal for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 29 - Echo environment output
+    - name : Echo the output
+      run : |
+        echo "azsql_deployment=${{ steps.ddl_azsqldb_deployment.outcome }}"
+        echo "synapse_deployment=${{ steps.ddl_synapse_deployment.outcome }}"
+        echo "dbx_deployment=${{ steps.ddl_dbx_deployment.outcome }}"
+      if : always()
+
+    # Step 30 - Check if SQL deployment is success and update environment variable
+    - name : Check deployment status
+      id : deployment_status
+      if : ${{ steps.ddl_azsqldb_deployment.outcome != 'success' || steps.ddl_synapse_deployment.outcome != 'success' || steps.ddl_dbx_deployment.outcome != 'success' }}
+      run : |
+        if [ "${{ steps.ddl_azsqldb_deployment.outcome }}" = "success" ] ; then
+          echo "azsql_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "azsql_deployment=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ steps.ddl_synapse_deployment.outcome }}" = "success" ] ; then
+          echo "synapse_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "synapse_deployment=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ steps.ddl_dbx_deployment.outcome }}" = "success" ] ; then
+          echo "dbx_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "dbx_deployment=false" >> $GITHUB_ENV
+        fi
+
+    # Step 31 - Azure logout for Non Prod service principal
+    - name: Azure logout
+      run: |
+        az logout
+      if: always() 
+
+    # Step 32 - Login to Azure using Prod service principal
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{env.AZURE_CREDENTIALS_PROD}}
+
+    # Step 33 - Prod GEN Keyvault Dynamic Whitelist for GitHub hosted runner
+    - name : Prod Keyvault Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG_CENTRAL}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}" --ip-address $agentIP
+
+    # Step 34 - Update audit log with required details with deployment status
+    - name : Audit Log update
+      run : |
+        python ./.github/scripts/audit_update.py
+      env :
+        envname : "${{env.ENV_NAME}}"
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+
+    # Step 35 - Prod GEN Keyvault Whitelist removal for GitHub hosted runner
+    - name : Prod Keyvault Whitelist removal for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG_CENTRAL}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}" --ip-address $agentIP
+
+    # Step 36 - Azure logout for Prod service principal
+    - name : Azure logout
+      run : |
+        az logout
+      if : always()
+
+# PPD Deployment  
+  deploy-to-PPD:
+    name : Deploy to PPD
+    # Runs for PR event only and depends on SIT deployment
+    needs: [ build,deploy-to-SIT ]
+    # The type of runner that the job will run on repo variable
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment : 
+      name : PPD
+      #url : 'http://ppd.myapp.com'
+    outputs:
+      script_folder_exists: ${{ steps.scripts.outputs.temp }} 
+      dbx_notebook : ${{ steps.scripts.outputs.dbx_notebook }}
+    steps: 
+
+    # Step 1 - Login to Azure using Prod service principal
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{secrets.AZURE_CREDENTIALS_PROD}}
+
+    # Step 2 - Checkout the repository with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth: ${fetch_depth}
+
+    # Step 3 - Download the artifacts from the build job
+    - name : Download Artifacts
+      uses : actions/download-artifact@v4
+      with :
+        path : published_package
+
+    # Step 4 - Initialize variable to be used later on
+    - name : Initialize variable
+      id : init
+      shell : bash
+      run: |
+        echo "DATABRICKS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_DATABRICKS']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_CONFIG_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_CONFIG']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SCHEMA_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SCHEMA']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_JMS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_JMS']}}" >> $GITHUB_OUTPUT
+        echo "DBX_AUTOMATED_DDL_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_AUTOMATED_DDL_IN_DBX']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_AZSQL=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_AZURESQL']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SYNAPSE=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SYNAPSE']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SYNAPSE_02_INSTANCE=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SYNAPSE_02_INSTANCE']}}" >> $GITHUB_OUTPUT
+        echo "ENV_NAME=PPD" >> $GITHUB_ENV
+        
+        # jms deployment variables
+        echo "MQ_HOST=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['MQ_HOST']}}" >> $GITHUB_ENV
+        echo "MQ_CHANNEL=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['MQ_CHANNEL']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_CONFLUENT=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['KAFKA_SERVERS_CONFLUENT']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_ENTERPRISE=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['KAFKA_SERVERS_ENTERPRISE']}}" >> $GITHUB_ENV
+        echo "K8S_CLUSTER=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_CLUSTER']}}" >> $GITHUB_ENV
+        echo "K8S_NAMESPACE=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_NAMESPACE']}}" >> $GITHUB_ENV
+        echo "LANDING_ACCOUNT=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['LANDING_ACCOUNT']}}" >> $GITHUB_ENV
+        echo "K8S_URL=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_URL']}}" >> $GITHUB_ENV
+        echo "K8S_SECRET=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_SECRET']}}" >> $GITHUB_ENV
+
+    # Step 5 - Storage Account Dynamic Whitelist for GitHub hosted runner
+    - name : Storage Account Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        write-output "Network rule list - "
+        az storage account network-rule list --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+        az storage account network-rule add --resource-group ${{vars.AZURE_RESOURCE_GROUP}} --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP
+
+    # Step 6 - GEN and DBK Keyvault Dynamic Whitelist for GitHub hosted runner
+    - name : Keyvault Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 7.0 - Deploy Wheel files if present using Az CLI using service principal login
+    - name : Deploy Wheel files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/prophecy/pipelines/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            for dir in ./published_package/assets-for-download/prophecy/pipelines/*/; do prophecy_pipeline=$(basename "$dir"); ls ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/*.whl; az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/prophecy_executables -s ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/   --overwrite  --auth-mode login; done            
+          else
+            echo "No Wheel file changes"
+          fi	
+
+    # Step 7 - Deploy config files if present using Az CLI using service principal login
+    - name : Deploy config files to azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/configs/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/configs -s ./published_package/assets-for-download/configs  --overwrite  --auth-mode login  
+          else
+            echo "No Config file changes"
+          fi
+
+    # Step 8 - Deploy schema files if present using Az CLI using service principal login
+    - name : Deploy schema files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_SCHEMA_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/schemas/ ]] ; then
+            ls  
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/schemas -s ./published_package/assets-for-download/schemas --overwrite  --auth-mode login
+          else
+            echo "No schema file changes"
+          fi
+
+    # Step 9 - Deploy jms config files if present using Az CLI using service principal login
+    - name : Deploy jms config files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/jms -s ./published_package/assets-for-download/jms --overwrite  --auth-mode login
+          else
+            echo "No jms config file changes"
+          fi
+
+    # Step 10 - Setup Python with required version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version : ${{ vars.PYTHON_VERSION }}
+
+    # Step 11 - Install ODBC Driver Manager for GitHub Hosted Runner
+    - name : Install ODBC Driver Manager for GitHub Hosted Runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : |
+        sudo curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+        sudo curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
+        # optional: for bcp and sqlcmd
+        sudo ACCEPT_EULA=Y apt-get install -y mssql-tools
+        echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+        source ~/.bashrc
+        # optional: for unixODBC development headers
+        sudo apt-get install -y unixodbc-dev
+        python -m pip install pyodbc
+
+    # Step 12 - Install ODBC Driver Manager for Self Hosted Runner
+    - name : Install ODBC Driver Manager for Self Hosted Runner
+      if : ${{ !contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : bash .github/scripts/odbc_driver_install.sh
+
+    # Step 13 - Install required python packages
+    - name : install python packages
+      run : |
+        python -m pip install --upgrade pip
+        pip install requests
+        python -m pip install PyYAML
+
+    # Step 14 - Get databricks token from Azure KeyVault
+    - name : Get databricks token
+      if : steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZ_DBX_KV_SECRET_KEY}} --vault-name ${{vars.AZ_DBX_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id : dbx_secret
+
+    # Step 15 - Databricks CLI setup using databricks token
+    - name : Databricks CLI setup to connect az KeyVault
+      if : steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0"
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{steps.dbx_secret.outputs.dbx_token}} 
+        jobs-api-version = 2.1 
+        EOF
+
+    # Step 16 - Deploy only changed notebooks in databricks workspace using databricks-cli
+    - name : Databricks - Deploy notebooks to workspace
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run: |
+        if [[ -d ./published_package/assets-for-download/notebooks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/notebooks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}  --overwrite
+        else
+          echo "No Databricks Notebook exists in this commit"
+        fi
+
+    # Step 17 - Deploy ADLS SQL script if present in databricks workspace using databricks-cli
+    - name : Databricks - Deploy DDL scripts to workspace
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      id : scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/databricks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/sql/databricks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks  --overwrite
+          echo "temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/databricks/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "dbx_notebook=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "dbx_notebook=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No Databricks Notebook exists in this commit"
+          echo "temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 18 - Check if JMS deployment required in this environment and if jms config changes present
+    - name : Get jms status flag
+      id : jms_status
+      if :  ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}} == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+          echo "DEPLOY_JMS_CONTROLLER = ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}}" 
+          echo "jms_deployment_status=true" >> $GITHUB_OUTPUT
+          output_string=""
+          append=","
+          
+          for file in ./published_package/assets-for-download/jms/*; do
+            echo "Processing $file"
+            filename=$(basename -- "$file")
+            echo "filename=$filename"
+            prefix_str="./jms/"
+            prefix_str+="$filename"
+            output_string+="$prefix_str$append"
+            done
+              
+          result_string="${output_string%,}"
+          echo "jms config=$result_string"
+          echo "result_string=$result_string" >> "$GITHUB_OUTPUT"
+        else
+          echo "No jms deployment"
+          echo "jms_deployment_status=false"
+          echo "DEPLOY_JMS_CONTROLLER = ${{env.DEPLOY_JMS_CONTROLLER}}"
+          echo "jms_deployment_status=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 19 - Generate values.yaml using template and provided jms configs
+    - name : python script to generate jms values
+      if : ${{ steps.jms_status.outputs.jms_deployment_status == 'true'  && steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true' }}
+      run : python ./.github/scripts/trigger_jms_deployment.py
+      env :
+        TENANT_ID : ${{env.TENANT_ID}}
+        SUBSCRIPTION_ID : ${{env.SUBSCRIPTION_ID_PROD}}
+        ENVIRONMENT_SHORT : ${{env.ENV_NAME}}
+        JMS_CONFIG : ${{steps.jms_status.outputs.result_string}}
+        MQ_HOST : ${{env.MQ_HOST}}
+        MQ_CHANNEL : ${{env.MQ_CHANNEL}}
+        KAFKA_SERVERS_CONFLUENT : ${{env.KAFKA_SERVERS_CONFLUENT}}
+        KAFKA_SERVERS_ENTERPRISE : ${{env.KAFKA_SERVERS_ENTERPRISE}}
+        K8S_CLUSTER : ${{env.K8S_CLUSTER}}
+        K8S_NAMESPACE : ${{env.K8S_NAMESPACE}}
+        LANDING_ACCOUNT : ${{env.LANDING_ACCOUNT}}
+        K8S_URL : ${{env.K8S_URL}}
+        K8S_SECRET : ${{env.K8S_SECRET}}
+        authorization_pat : ${{ env.GH_TOKEN }}
+        repo_name : ${{ env.repo_name }}
+        ref_branch : ${{github.head_ref || github.ref_name}}
+
+    # Step 20 - Identify SQL scripts (if any) in current PR for AzSQLDB deployment  
+    - name : Identify SQL scripts for AzSQLDB deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_AZSQL  == 'true'
+      id : azsqldb_scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/azsqldb/ ]] ; then
+          echo "sql_temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/azsqldb/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "azsqldb_script=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "azsqldb_script=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No AzSQL DB script exists in this commit"
+          echo "sql_temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 21 - Get AzSQL DB connection token from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get AzSQL DB connection token
+      continue-on-error : true
+      if : ${{ steps.azsqldb_scripts.outputs.sql_temp == 'true' && steps.init.outputs.DEPLOY_AZSQL  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZSQLDB_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "azsql_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/ppd/g' ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+        cat ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+      id : azsql_secret
+
+    # Step 22 - Run AzSQL script in AzSQL DB based on retrieved connection token
+    - name : AzSQLDB automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_azsqldb_deployment
+      continue-on-error : true
+      if : ${{ steps.azsqldb_scripts.outputs.sql_temp == 'true' && steps.init.outputs.DEPLOY_AZSQL  == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.azsql_secret.outputs.azsql_token}}
+        path : ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+
+    # Step 23 - Identify SQL scripts (if any) in current PR for Synapse deployment
+    - name : Identify SQL scripts for Synapse deployment
+      continue-on-error : true
+      if : steps.init.outputs.DEPLOY_SYNAPSE  == 'true'
+      id : synapse_scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/synapse/ ]] ; then
+          echo "synapse_temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/synapse/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "synapse_script=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "synapse_script=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No synapse script exists in this commit"
+          echo "synapse_temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 24 - Get Synapse connection token from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get Synapse connection token
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts.outputs.synapse_temp == 'true' && steps.init.outputs.DEPLOY_SYNAPSE  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SYNAPSE_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/ppd/g' ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+        cat ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+      id : synapse_secret
+
+    # Step 25 - Run SQL script in Synapse based on retrieved connection token
+    - name : Synapse automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_synapse_deployment
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts.outputs.synapse_temp == 'true' && steps.init.outputs.DEPLOY_SYNAPSE == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :        
+        connection-string : ${{steps.synapse_secret.outputs.synapse_token}}
+        path : ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+        
+        
+    # Step 23.1 - Identify SQL scripts (if any) in current PR for Synapse 02 instance deployment
+    - name : Identify SQL scripts for Synapse 02 instance deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE  == 'true'
+      id : synapse_scripts_02_instance
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/synapse_02_instance/ ]] ; then
+          echo "synapse_temp_02=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/synapse_02_instance/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "synapse_script_02_instance=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "synapse_script_02_instance=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No synapse script exists in this commit"
+          echo "synapse_temp_02=false" >> $GITHUB_OUTPUT
+        fi
+
+
+    # Step 24.1 - Get Synapse connection token(for 02 instance) from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get connection token for synapse 02 instance (synapse managed)
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts_02_instance.outputs.synapse_temp_02 == 'true' && steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SYNAPSE_KV_SECRETKEY_02_INSTANCE}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/ppd/g' ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+        cat ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+      id : synapse_secret_02_instance
+
+    # Step 25.1 - Run SQL script in Synapse based on retrieved connection token
+    - name : Synapse(02) managed instance automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_synapse_deployment_02_instance
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts_02_instance.outputs.synapse_temp_02 == 'true' && steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.synapse_secret_02_instance.outputs.synapse_token}}
+        path : ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+ 
+
+    # Step 26 - Run SQL script in Databricks using databricks notebook run action
+    - name : Databricks Execution [ DDL script automated run ] ******** validation required  ********
+      id : ddl_dbx_deployment
+      continue-on-error : true
+      if : ${{ steps.scripts.outputs.temp == 'true' && steps.init.outputs.DATABRICKS_CONTROLLER  == 'true' && steps.init.outputs.DBX_AUTOMATED_DDL_CONTROLLER  == 'true' }}
+      uses : databricks/run-notebook@v0
+      with :
+        workspace-notebook-path : /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks/${{ steps.scripts.outputs.dbx_notebook }}
+        databricks-host : ${{ vars.DATABRICKS_HOST_URL }}
+        databricks-token : ${{steps.dbx_secret.outputs.dbx_token}}
+        notebook-params-json :   "[{\"key\":\"env\",\"value\":\"ppd\"}]"
+        timeout-seconds : ${{vars.DBX_PROCESS_TIMEOUT}}
+        run-name : "https://github.com/DigitalInnovation/${{env.repo_name}} : ${{ steps.scripts.outputs.dbx_notebook }}"
+        new-cluster-json: >
+          {
+            "num_workers": ${{vars.DBX_WORKER_COUNT}},
+            "spark_version": "${{vars.DBX_RUNTIME_VERSION}}",
+            "node_type_id": "${{vars.DBX_NODE_TYPE}}",
+            "driver_node_type_id": "${{vars.DBX_NODE_TYPE}}",
+            "init_scripts": [
+              {
+                "${{vars.DBX_INIT_SCRIPT_PLACEHOLDER}}": {
+                  "destination": "${{vars.INIT_SCRIPT}}"
+                }
+              }
+            ]
+          }
+      timeout-minutes: 30
+    # Step 27 - Create tag for the current commit
+    - name : Create tag
+      run : |
+        set -e
+        trap 'git tag $current_tag && git push origin $current_tag && latest_tag=$(git describe --tags `git rev-list --tags --max-count=1`) && echo "latest tag=$latest_tag" && echo "Git describe command failed, but we are continuing..." && exit 0' ERR
+        
+        branch_name=${{env.source_branch}}
+        echo "branch_name=$branch_name"
+        
+        #current_tag="v-${{env.commit_id}}"
+        #prev_tag=$(git describe --tags `git rev-list --tags --max-count=1`)
+        
+        current_tag="$branch_name-${{env.commit_id}}"
+        prev_tag=$(git log --tags --simplify-by-decoration --pretty="format:%ai %d" | grep -o 'tag: .*' | awk '{print substr($2, 1, length($2)-1)}' | grep -m1 ${{env.source_branch}})
+        
+        echo "current_tag=$current_tag"
+        echo "prev_tag=$prev_tag"
+        
+        if [ "$prev_tag" = "$current_tag" ] ; then
+          echo "Current tag already exists -- $current_tag"
+        else
+          git tag $current_tag
+          git push origin $current_tag
+          latest_tag=$(git describe --tags `git rev-list --tags --max-count=1`)
+          echo "latest tag=$latest_tag" >> $GITHUB_ENV
+        fi
+
+    # Step 28 - Check if SQL deployment is success and update environment variable
+    - name : Check deployment status
+      id : deployment_status
+      if : ${{ steps.ddl_azsqldb_deployment.outcome != 'success' || steps.ddl_synapse_deployment.outcome != 'success' || steps.ddl_dbx_deployment.outcome != 'success' }}
+      run : |
+        if [ "${{ steps.ddl_azsqldb_deployment.outcome }}" = "success" ] ; then
+          echo "azsql_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "azsql_deployment=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ steps.ddl_synapse_deployment.outcome }}" = "success" ] ; then
+          echo "synapse_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "synapse_deployment=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ steps.ddl_dbx_deployment.outcome }}" = "success" ] ; then
+          echo "dbx_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "dbx_deployment=false" >> $GITHUB_ENV
+        fi
+
+    # Step 29 - Storage Account Dynamic Whitelist removal for GitHub hosted runner
+    - name : Storage Account Whitelist removal for GitHub hosted runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az storage account network-rule remove --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+
+    # Step 30 - GEN and DBK Keyvault Dynamic Whitelist removal for GitHub hosted runner
+    - name : Keyvault Whitelist removal for GitHub hosted runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 31 - Prod GEN Keyvault Whitelist for GitHub hosted runner
+    - name : Prod Keyvault Whitelist for GitHub hosted runner - Check and add agent IP
+      if: ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell: pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG_CENTRAL}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}" --ip-address $agentIP
+
+    # Step 32 - Update audit log with required details with deployment status
+    - name : Audit Log update
+      run : |
+        python ./.github/scripts/audit_update.py
+      env :
+        envname : "${{env.ENV_NAME}}"
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+
+    # Step 33 - Prod GEN Keyvault Whitelist removal for GitHub hosted runner
+    - name : Prod Keyvault Whitelist removal for GitHub hosted runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"  
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG_CENTRAL}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}" --ip-address $agentIP
+
+    # Step 34 - Azure logout for Prod service principal
+    - name: Azure logout
+      run: |
+        az logout
+      if: always()  
+
+ 
+# PROD Deployment  
+  deploy-to-PROD:
+    name : Deploy to PROD
+    # Runs for PR Merge event only and depends on Build stage
+    if : github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.action=='closed'
+    needs: [ build ]
+    # Run on the runner label defined in the variable
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment : 
+      name : PROD
+      #url : http://prod.myapp.com'
+    outputs:
+      script_folder_exists: ${{ steps.scripts.outputs.temp }} 
+      dbx_notebook : ${{ steps.scripts.outputs.dbx_notebook }}
+    steps: 
+
+    # Step 1 - Login to Azure using Prod service principal
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{secrets.AZURE_CREDENTIALS_PROD}}
+
+    # Step 2 - Checkout the repository with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth: ${fetch_depth}
+
+    # Step 3 - Download the artifacts from the build job
+    - name : Download Artifacts
+      uses : actions/download-artifact@v4
+      with :
+        path : published_package
+
+    # Step 4 - Initialize variable to be used later on
+    - name : Initialize variable
+      id : init
+      shell : bash
+      run: |
+        echo "DATABRICKS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_DATABRICKS']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_CONFIG_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_CONFIG']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SCHEMA_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SCHEMA']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_JMS_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_JMS']}}" >> $GITHUB_OUTPUT
+        echo "DBX_AUTOMATED_DDL_CONTROLLER=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_AUTOMATED_DDL_IN_DBX']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_AZSQL=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_AZURESQL']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SYNAPSE=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SYNAPSE']}}" >> $GITHUB_OUTPUT
+        echo "DEPLOY_SYNAPSE_02_INSTANCE=${{ fromJSON(vars.ACTIVITY_CONTROLLER)['DEPLOY_SYNAPSE_02_INSTANCE']}}" >> $GITHUB_OUTPUT
+        echo "ENV_NAME=PROD" >> $GITHUB_ENV
+
+        echo "MQ_HOST=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['MQ_HOST']}}" >> $GITHUB_ENV
+        echo "MQ_CHANNEL=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['MQ_CHANNEL']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_CONFLUENT=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['KAFKA_SERVERS_CONFLUENT']}}" >> $GITHUB_ENV
+        echo "KAFKA_SERVERS_ENTERPRISE=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['KAFKA_SERVERS_ENTERPRISE']}}" >> $GITHUB_ENV
+        echo "K8S_CLUSTER=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_CLUSTER']}}" >> $GITHUB_ENV
+        echo "K8S_NAMESPACE=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_NAMESPACE']}}" >> $GITHUB_ENV
+        echo "LANDING_ACCOUNT=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['LANDING_ACCOUNT']}}" >> $GITHUB_ENV
+        echo "K8S_URL=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_URL']}}" >> $GITHUB_ENV
+        echo "K8S_SECRET=${{ fromJSON(vars.JMS_DEPLOYMENT_PROD)['K8S_SECRET']}}" >> $GITHUB_ENV
+
+    # Step 5 - Storage Account Dynamic Whitelist for GitHub hosted runner
+    - name : Storage Account Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        write-output "Network rule list - "
+        az storage account network-rule list --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+        az storage account network-rule add --resource-group ${{vars.AZURE_RESOURCE_GROUP}} --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP
+
+    # Step 6 - GEN and DBK Keyvault Dynamic Whitelist for GitHub hosted runner
+    - name : Keyvault Whitelist for GitHub hosted runner - Check and add agent IP
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_DBX_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+        az keyvault network-rule add --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 7.0 - Deploy Wheel files if present using Az CLI using service principal login
+    - name : Deploy Wheel files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/prophecy/pipelines/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            for dir in ./published_package/assets-for-download/prophecy/pipelines/*/; do prophecy_pipeline=$(basename "$dir"); ls ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/*.whl; az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/prophecy_executables -s ./published_package/assets-for-download/prophecy/pipelines/${prophecy_pipeline}/code/dist/   --overwrite  --auth-mode login; done            
+          else
+            echo "No Wheel file changes"
+          fi	
+
+    # Step 7 - Deploy config files if present using Az CLI using service principal login
+    - name : Deploy config files to azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_CONFIG_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion: latest
+        inlineScript: |
+          if [[ -d ./published_package/assets-for-download/configs/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/configs -s ./published_package/assets-for-download/configs  --overwrite  --auth-mode login
+          else
+            echo "No Config file changes"
+          fi
+
+    # Step 8 - Deploy schema files if present using Az CLI using service principal login
+    - name : Deploy schema files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_SCHEMA_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/schemas/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/schemas -s ./published_package/assets-for-download/schemas --overwrite  --auth-mode login
+          else
+            echo "No schema file changes"
+          fi
+
+    # Step 9 - Deploy jms config files if present using Az CLI using service principal login
+    - name : Deploy jms config files in azure storage using Az CLI
+      if : steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true'
+      uses : azure/CLI@v1
+      with :
+        azcliversion : latest
+        inlineScript : |
+          if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+            ls
+            az login --service-principal --username ${{env.CLINET_ID_PROD}} --password ${{env.CLINET_SECRET_PROD}} --tenant ${{env.TENANT_ID}}
+            az storage blob upload-batch --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} -d 'projects' --destination-path ${{needs.build.outputs.REPO_SHORT_NAME}}/jms -s ./published_package/assets-for-download/jms --overwrite  --auth-mode login
+          else
+            echo "No jms config file changes"
+          fi
+
+    # Step 10 - Setup Python with required version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version : ${{ vars.PYTHON_VERSION }}
+
+    # Step 11 - Install ODBC Driver Manager for GitHub Hosted Runner
+    - name : Install ODBC Driver Manager for GitHub Hosted Runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : |
+        sudo curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+        sudo curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
+        # optional: for bcp and sqlcmd
+        sudo ACCEPT_EULA=Y apt-get install -y mssql-tools
+        echo 'export PATH="$PATH:/opt/mssql-tools/bin"' >> ~/.bashrc
+        source ~/.bashrc
+        # optional: for unixODBC development headers
+        sudo apt-get install -y unixodbc-dev
+        python -m pip install pyodbc
+
+    # Step 12 - Install ODBC Driver Manager for Self Hosted Runner
+    - name : Install ODBC Driver Manager for Self Hosted Runner
+      if : ${{ !contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      run : bash .github/scripts/odbc_driver_install.sh
+
+    # Step 13 - Install required python packages
+    - name : install python packages
+      continue-on-error : false
+      run : |
+        python -m pip install --upgrade pip
+        pip install requests
+        python -m pip install PyYAML
+        pip install sendgrid
+
+    # Step 14 - Get databricks token from Azure KeyVault
+    - name : Get databricks token
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZ_DBX_KV_SECRET_KEY}} --vault-name ${{vars.AZ_DBX_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id : dbx_secret
+
+    # Step 15 - Databricks CLI setup using databricks token
+    - name : Databricks CLI setup to connect az KeyVault
+      if : steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0"
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{steps.dbx_secret.outputs.dbx_token}} 
+        jobs-api-version = 2.1 
+        EOF
+
+    # Step 16 - Deploy only changed notebooks in databricks workspace using databricks-cli
+    - name : Databricks - Deploy notebooks to workspace
+      if :  steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/notebooks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/notebooks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}  --overwrite
+        else
+          echo "No Databricks Notebook exists in this commit"
+        fi
+
+    # Step 17 - Deploy ADLS SQL script if present in databricks workspace using databricks-cli
+    - name : Databricks - Deploy DDL scripts to workspace
+      if : steps.init.outputs.DATABRICKS_CONTROLLER  == 'true'
+      id : scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/databricks/ ]] ; then
+          databricks workspace import_dir ./published_package/assets-for-download/sql/databricks/ /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks  --overwrite
+          echo "temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/databricks/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "dbx_notebook=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "dbx_notebook=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No Databricks Notebook exists in this commit"
+          echo "temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 18 - Check if JMS deployment required in this environment and if jms config changes present
+    - name : Get jms status flag
+      id : jms_status
+      if : ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}} == 'true'
+      run : |
+        if [[ -d ./published_package/assets-for-download/jms/ ]] ; then
+          echo "DEPLOY_JMS_CONTROLLER = ${{steps.init.outputs.DEPLOY_JMS_CONTROLLER}}" 
+          echo "jms_deployment_status=true" >> $GITHUB_OUTPUT
+          output_string=""
+          append=","
+          
+          for file in ./published_package/assets-for-download/jms/*; do
+            echo "Processing $file"
+            filename=$(basename -- "$file")
+            echo "filename=$filename"
+            prefix_str="./jms/"
+            prefix_str+="$filename"
+            output_string+="$prefix_str$append"
+            done
+
+          result_string="${output_string%,}"
+          echo "jms config=$result_string"
+          echo "result_string=$result_string" >> "$GITHUB_OUTPUT"
+        else
+          echo "No jms deployment"
+          echo "jms_deployment_status=false"
+          echo "DEPLOY_JMS_CONTROLLER = ${{env.DEPLOY_JMS_CONTROLLER}}"
+          echo "jms_deployment_status=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 19 - Generate values.yaml using template and provided jms configs
+    - name : python script to generate jms values
+      if : ${{ steps.jms_status.outputs.jms_deployment_status == 'true'  && steps.init.outputs.DEPLOY_JMS_CONTROLLER == 'true' }}
+      run : python ./.github/scripts/trigger_jms_deployment.py
+      env :
+        TENANT_ID : ${{env.TENANT_ID}}
+        SUBSCRIPTION_ID : ${{env.SUBSCRIPTION_ID_PROD}}
+        ENVIRONMENT_SHORT : ${{env.ENV_NAME}}
+        JMS_CONFIG : ${{steps.jms_status.outputs.result_string}}
+        MQ_HOST : ${{env.MQ_HOST}}
+        MQ_CHANNEL : ${{env.MQ_CHANNEL}}
+        KAFKA_SERVERS_CONFLUENT : ${{env.KAFKA_SERVERS_CONFLUENT}}
+        KAFKA_SERVERS_ENTERPRISE : ${{env.KAFKA_SERVERS_ENTERPRISE}}
+        K8S_CLUSTER : ${{env.K8S_CLUSTER}}
+        K8S_NAMESPACE : ${{env.K8S_NAMESPACE}}
+        LANDING_ACCOUNT : ${{env.LANDING_ACCOUNT}}
+        K8S_URL : ${{env.K8S_URL}}
+        K8S_SECRET : ${{env.K8S_SECRET}}
+        authorization_pat : ${{ env.GH_TOKEN }}
+        repo_name : ${{ env.repo_name }}
+        ref_branch : ${{ github.base_ref }}
+
+    # Step 20 - Identify SQL scripts (if any) in current PR for AzSQLDB deployment
+    - name : Identify SQL scripts for AzSQLDB deployment
+      continue-on-error : true
+      if : steps.init.outputs.DEPLOY_AZSQL  == 'true'
+      id : azsqldb_scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/azsqldb/ ]] ; then
+          echo "sql_temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/azsqldb/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "azsqldb_script=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "azsqldb_script=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No AzSQL DB script exists in this commit"
+          echo "sql_temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 21 - Get AzSQL DB connection token from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get AzSQL DB connection token
+      continue-on-error : true
+      if : ${{ steps.azsqldb_scripts.outputs.sql_temp == 'true' && steps.init.outputs.DEPLOY_AZSQL  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.AZSQLDB_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "azsql_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/prod/g' ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+        cat ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+      id : azsql_secret
+
+    # Step 22 - Run AzSQL script in AzSQL DB based on retrieved connection token
+    - name : AzSQLDB automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_azsqldb_deployment
+      continue-on-error : true
+      if : ${{ steps.azsqldb_scripts.outputs.sql_temp == 'true' && steps.init.outputs.DEPLOY_AZSQL  == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.azsql_secret.outputs.azsql_token}}
+        path: ./sql/azsqldb/${{steps.azsqldb_scripts.outputs.azsqldb_script}}.sql
+
+    # Step 23 - Identify SQL scripts (if any) in current PR for Synapse deployment
+    - name : Identify SQL scripts for Synapse deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_SYNAPSE  == 'true'
+      id : synapse_scripts
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/synapse/ ]] ; then
+          echo "synapse_temp=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/synapse/)
+          for i in ${f}; do 
+            echo "$i";
+            done;
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "synapse_script=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "synapse_script=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No synapse script exists in this commit"
+          echo "synapse_temp=false" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 24 - Get Synapse connection token from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get Synapse connection token
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts.outputs.synapse_temp == 'true' && steps.init.outputs.DEPLOY_SYNAPSE  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SYNAPSE_KV_SECRETKEY}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/prod/g' ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+        cat ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+      id : synapse_secret
+
+    # Step 25 - Run SQL script in Synapse based on retrieved connection token
+    - name : Synapse automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_synapse_deployment
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts.outputs.synapse_temp == 'true' && steps.init.outputs.DEPLOY_SYNAPSE == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.synapse_secret.outputs.synapse_token}}
+        path : ./sql/synapse/${{steps.synapse_scripts.outputs.synapse_script}}.sql
+        
+        
+    # Step 23.1 - Identify SQL scripts (if any) in current PR for Synapse 02 instance deployment
+    - name : Identify SQL scripts for Synapse 02 instance deployment
+      continue-on-error : true
+      if :  steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE  == 'true'
+      id : synapse_scripts_02_instance
+      run : |
+        if [[ -d ./published_package/assets-for-download/sql/synapse_02_instance/ ]] ; then
+          echo "synapse_temp_02=true" >> $GITHUB_OUTPUT
+          f=$(ls ./published_package/assets-for-download/sql/synapse_02_instance/)
+          for i in ${f}; do 
+            echo "$i"; 
+            done; 
+          # expecting only one file in the folder
+          IFS='.' read -ra arr <<< "$i"
+          echo "synapse_script_02_instance=${arr[0]}"
+
+          IFS='.' read -ra arr <<< "$f"
+          echo "synapse_script_02_instance=${arr[0]}" >> $GITHUB_OUTPUT
+        else
+          echo "No synapse script exists in this commit"
+          echo "synapse_temp_02=false" >> $GITHUB_OUTPUT
+        fi
+
+
+    # Step 24.1 - Get Synapse connection token(for 02 instance) from GEN KeyVault and replace environment variables in the SQL script
+    - name : Get connection token for synapse 02 instance (synapse managed)
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts_02_instance.outputs.synapse_temp_02 == 'true' && steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE  == 'true'}}
+      run : |
+        temp=$(az keyvault secret show --name ${{vars.SYNAPSE_KV_SECRETKEY_02_INSTANCE}} --vault-name ${{vars.AZ_GEN_KV_SECRET_SCOPE}} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+        sed -i -E 's/\$[eE][nN][vV]|\$\([eE][nN][vV]\)|\$\{[eE][nN][vV]\}/prod/g' ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+        cat ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+      id : synapse_secret_02_instance
+
+
+    # Step 25.1 - Run SQL script in Synapse based on retrieved connection token
+    - name : Synapse(02) managed instance automated run [ DDL script execution] ******** validation required  ********
+      id : ddl_synapse_deployment_02_instance
+      continue-on-error : true
+      if : ${{ steps.synapse_scripts_02_instance.outputs.synapse_temp_02 == 'true' && steps.init.outputs.DEPLOY_SYNAPSE_02_INSTANCE == 'true'}}
+      uses : azure/sql-action@v2.2
+      with :
+        connection-string : ${{steps.synapse_secret_02_instance.outputs.synapse_token}}
+        path : ./sql/synapse_02_instance/${{steps.synapse_scripts_02_instance.outputs.synapse_script_02_instance}}.sql
+
+
+    # Step 26 - Run SQL script in Databricks using databricks notebook run action
+    - name : Databricks Execution [ DDL script automated run ] ******** validation required  ********
+      id : ddl_dbx_deployment
+      continue-on-error : true
+      if : ${{ steps.scripts.outputs.temp == 'true' && steps.init.outputs.DATABRICKS_CONTROLLER  == 'true' && steps.init.outputs.DBX_AUTOMATED_DDL_CONTROLLER  == 'true' }}
+      uses : databricks/run-notebook@v0
+      with :
+        workspace-notebook-path : /projects/${{needs.build.outputs.REPO_SHORT_NAME}}/sql/databricks/${{ steps.scripts.outputs.dbx_notebook }}
+        databricks-host : ${{ vars.DATABRICKS_HOST_URL }}
+        databricks-token : ${{steps.dbx_secret.outputs.dbx_token}}
+        notebook-params-json :   "[{\"key\":\"env\",\"value\":\"prod\"}]"
+        timeout-seconds : ${{vars.DBX_PROCESS_TIMEOUT}}
+        run-name : "https://github.com/DigitalInnovation/${{env.repo_name}} : ${{ steps.scripts.outputs.dbx_notebook }}"
+        new-cluster-json: >
+          {
+            "num_workers": ${{vars.DBX_WORKER_COUNT}},
+            "spark_version": "${{vars.DBX_RUNTIME_VERSION}}",
+            "node_type_id": "${{vars.DBX_NODE_TYPE}}",
+            "driver_node_type_id": "${{vars.DBX_NODE_TYPE}}",
+            "init_scripts": [
+              {
+                "${{vars.DBX_INIT_SCRIPT_PLACEHOLDER}}": {
+                  "destination": "${{vars.INIT_SCRIPT}}"
+                }
+              }
+            ]
+          }
+      timeout-minutes: 30
+    # Step 27 - Update change log for the current changes
+    - name : Update change log
+      run : python ./.github/scripts/changelog_capture.py
+      env :
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        sqldb_secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        PAT_GITHUB_SECRET_KEY : ${{vars.PAT_GITHUB_SECRET_KEY}}
+        github_api_version : ${{vars.GH_API_VERSION}}
+
+    # Step 28 - Check if SQL deployment is success and update environment variable
+    - name : Check deployment status
+      id : deployment_status
+      if : ${{ steps.ddl_azsqldb_deployment.outcome != 'success' || steps.ddl_synapse_deployment.outcome != 'success' || steps.ddl_dbx_deployment.outcome != 'success' }}
+      run : |
+        if [ "${{ steps.ddl_azsqldb_deployment.outcome }}" = "success" ] ; then
+          echo "azsql_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "azsql_deployment=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ steps.ddl_synapse_deployment.outcome }}" = "success" ] ; then
+          echo "synapse_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "synapse_deployment=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ steps.ddl_dbx_deployment.outcome }}" = "success" ] ; then
+          echo "dbx_deployment=true" >> $GITHUB_ENV
+        else 
+          echo "dbx_deployment=false" >> $GITHUB_ENV
+        fi
+
+    # Step 29 - Sendout mail in case of hotfix deployment
+    - name : Hotfix Deployment SendEmail
+      if : github.event_name == 'pull_request' && startsWith(github.head_ref,'hf')
+      run : python ./.github/scripts/hotfixdeployment_sendemail.py
+      env :
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        PAT_GITHUB_SECRET_KEY : ${{vars.PAT_GITHUB_SECRET_KEY}}
+        github_api_version : ${{vars.GH_API_VERSION}}
+
+    # Step 30 - Update audit log with required details with deployment status
+    - name : Audit log update
+      run : |
+        python ./.github/scripts/audit_update.py
+      env :
+        envname : "${{env.ENV_NAME}}"  
+        key_vault_name : ${{vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL}}
+        secret_name : ${{vars.AUDIT_AZSQLDB_KV_SECRETKEY}}
+        CLINET_ID : ${{env.CLINET_ID_PROD}}
+        CLINET_SECRET : ${{env.CLINET_SECRET_PROD}}
+
+    # Step 31 - Storage Account Dynamic Whitelist removal for GitHub hosted runner
+    - name : Storage Account Whitelist removal for GitHub hosted runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az storage account network-rule remove --account-name ${{vars.BLOB_STORAGE_ACCOUNT_NAME}} --ip-address $agentIP --resource-group ${{vars.AZURE_RESOURCE_GROUP}}
+
+    # Step 32 - GEN and DBK Keyvault Dynamic Whitelist removal for GitHub hosted runner
+    - name : Keyvault Whitelist removal for GitHub hosted runner
+      if : ${{ contains(vars.RUNNER_LABEL,'ubuntu-latest') }}
+      shell : pwsh
+      run : |
+        $agentIP = (Invoke-WebRequest -uri "http://ifconfig.me/ip").Content
+        write-output "GitHub Agent IP address '$agentIP'"
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_DBX_RG}}" --name "${{vars.AZ_DBX_KV_SECRET_SCOPE}}" --ip-address $agentIP
+        az keyvault network-rule remove --resource-group "${{vars.AZ_KV_RG}}" --name "${{vars.AZ_GEN_KV_SECRET_SCOPE}}" --ip-address $agentIP
+
+    # Step 33 - Azure logout for Prod service principal
+    - name: Azure logout
+      run: |
+        az logout
+      if: always() 

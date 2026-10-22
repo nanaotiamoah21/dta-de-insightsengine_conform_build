@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ template "fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ template "fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+    heritage: "{{ .Release.Service }}"
+spec:
+  replicas: {{ .Values.replicas }}
+  # We dont need a large deployment history limit as Helm keeps it's own
+  # history
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: {{ template "fullname" . }}
+      release: "{{ .Release.Name }}"
+  template:
+    metadata:
+      namespace: {{ .Values.namespace }}
+      labels:
+        app: {{ template "fullname" . }}
+        release: "{{ .Release.Name }}"
+    spec:
+      containers:
+      - name: server
+        image: {{ template "docker-image" . }}
+        imagePullPolicy: Always
+        {{- if .Values.secrets }}
+        volumeMounts:
+          - name: kv-secrets
+            mountPath: "/mnt/kvsecrets"
+            readOnly: true
+        {{- end }}
+        ports:
+        # The port that our container listens for HTTP requests on
+        - containerPort: {{ .Values.dockerPort }}
+          name: http
+      # imagePullSecrets:
+      # - name: nexus-secre t
+        {{- if .Values.securityContext.enabled }}
+        securityContext:
+          runAsUser: {{ .Values.securityContext.runAsUser }}
+        {{- end }}
+      {{- if .Values.ENV }}
+        env:
+        {{- range $key, $val := .Values.ENV }}
+        - name: {{ $key }}
+          value: {{ $val | quote }}
+        {{ end }}
+      {{- end }}
+      {{- if .Values.resources }}
+        resources:
+{{ toYaml .Values.resources | indent 10 }}
+      {{- end }}
+      {{- if .Values.securityContext.enabled }}
+      securityContext:
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - {{ template "fullname" . }}
+              topologyKey: failure-domain.beta.kubernetes.io/zone
+      {{- if .Values.secrets }}
+      volumes:      
+        - name: kv-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: kv-secrets-{{ template "fullname" . }}
+            nodePublishSecretRef:
+              name: {{ .Values.keyvault.credentials }}     
+      {{- end }}

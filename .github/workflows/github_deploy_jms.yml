@@ -1,0 +1,77 @@
+name: JMS_Deployment_GitHub
+
+on:
+  # Trigger the workflow on workflow_dispatch event with input parameters
+  workflow_dispatch:
+    inputs:
+      # jms configs are json value in the format of a string
+      jms_configs:
+        description: 'JMS configs'
+        required: true
+        type: string
+      k8s_url:
+        description: 'AKS URL'
+        required: true
+        type: string
+      aks_creds_secret_name:
+        description: 'AKS Creds Secret Name'
+        required: true
+        type: string
+
+jobs:
+  Deploy:
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    steps:
+
+    # Checkout the repository with fetch depth as 2
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 2
+
+    # Set up python with required version
+    - name: Set up python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ vars.PYTHON_VERSION }}
+
+    # Install required python packages
+    - name: Install Python package
+      continue-on-error: false
+      run: |
+        pip install --upgrade pip
+        pip install requests
+        pip install PyYAML
+
+    # Execute python script to generate values.yaml file with provided jms configs
+    - name: execute python script # run main.py
+      run: python ./.github/scripts/generate_jms_values.py
+      env:
+        CONFIGS: ${{inputs.jms_configs}}
+        JMS_DEFAULT_CONFIGS: ${{vars.JMS_CONFIGS}}
+    
+    # Set kubernetes context with service account secret and k8s url
+    - uses: azure/k8s-set-context@v3
+      with:
+        method: service-account
+        k8s-url: ${{ inputs.k8s_url }}
+        k8s-secret: ${{ secrets[inputs.aks_creds_secret_name] }}
+
+    # Bake helm chart with provided values.yaml file with 1 replica
+    - uses: azure/k8s-bake@v2
+      with:
+        renderEngine: 'helm'
+        helmChart: './.github/jms/'
+        overrideFiles: ${{ env.value_file_name }}
+        overrides: |
+          replicas: 1
+        helm-version: 'latest'
+        releaseName: ${{ env.release_name }}
+      id: bake
+
+    # Deploy the baked manifests to k8s cluster with provided namespace
+    - uses: Azure/k8s-deploy@v1.2
+      with:
+        action: deploy
+        manifests: ${{ steps.bake.outputs.manifestsBundle }}
+        namespace: ${{ env.k8s_namespace }}
+        pull-images: false

@@ -1,0 +1,55 @@
+cluster: dev01
+namespace: mnsdta-bd01-dev
+
+dockerImage: dtaintegrationcomponentsregistry.azurecr.io/jmsbridge
+dockerTag: 1.1.1
+dockerPort: 8080
+
+# Container environment variables
+ENV:
+  JAVA_OPTS: <GENERATED_FROM_SCRIPT>
+
+keyvault:
+  name: dta-eun-ndev-kv-dbk-01
+  resourceGroup: dta-eun-ndev-rg-kv-01
+  subscriptionId: 99626c5d-0085-4b5c-88c1-cb34b47453cc
+  tenantId: bd5c6713-7399-4b31-be79-78f2d078e543
+  credentials: dta-eun-ndev-sp-akstokv-01
+
+secrets:
+  - confluent-access-user
+  - confluent-access-pass
+  - accesskey-blb-landdir01
+
+# Auto Scaler
+# Replica count for your pods. For production always higher than 1, because if one pod dies your app will be unavailable until the pod recovers
+replicas: 1
+replicasMax: 10
+
+# CPU target to trigger auto scaling of your pods
+cpuTargetPercentage: 50
+
+ingress:
+  # If not specified, a random name will be generated
+  name: bd-poc
+  subdomain: services
+
+  # Mark metric as true to enable custom metrics for your application
+  metric: false
+
+#
+# Resources request
+#
+# Evaluate the needs of your application in order to request the right amount of resources
+resources:
+  requests:
+    memory: 100Mi
+    cpu: 200m
+
+securityContext:
+  runAsUser: 999
+
+service:
+  type: ClusterIP
+  port: 80
+  dockerPort: 5000

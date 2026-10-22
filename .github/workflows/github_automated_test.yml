@@ -1,0 +1,385 @@
+name: Github Automated Test
+
+env:
+  environment: ${{ vars.ENVIRONMENT }}
+  REPO_NAME: ${{ github.event.repository.name }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  Fetch_Depth: 2
+
+# [ Azure Service Principal Credentials declared as secret for Non-Prod ]
+  AZURE_CREDENTIALS_NON_PROD: ${{secrets.AZURE_CREDENTIALS_NON_PROD}}
+  CLINET_ID_NON_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['clientId']}}
+  CLINET_SECRET_NON_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['clientSecret']}}
+  SUBSCRIPTION_ID_NON_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['subscriptionId']}}
+  TENANT_ID : ${{ fromJSON(secrets.AZURE_CREDENTIALS_NON_PROD)['tenantId']}}
+
+# [ Azure Service Principal Credentials declared as secret for Prod ] 
+  AZURE_CREDENTIALS_PROD: ${{secrets.AZURE_CREDENTIALS_PROD}}
+  CLINET_ID_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_PROD)['clientId']}}
+  CLINET_SECRET_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_PROD)['clientSecret']}}
+  SUBSCRIPTION_ID_PROD : ${{ fromJSON(secrets.AZURE_CREDENTIALS_PROD)['subscriptionId']}}
+  
+# Controls when the workflow will start - trigger
+on:
+  # Allows you to run this workflow manually from the actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+
+  Get-Repo-Name:
+    # This job runs on a self-hosted runner
+    runs-on : ${{ fromJSON(vars.RUNNER_LABEL) }}
+    outputs:
+      REPO_SHORT_NAME: ${{ steps.repo.outputs.result }}
+    steps: 
+
+    # This step gets the repository name and short name
+    - name: Get repository details
+      id : repo
+      run: |
+        echo "REPOSITORY_NAME=${REPO_NAME}" 
+        ref=$(echo "${REPO_NAME}" | grep -o "-" | wc -l)
+        REPO_SHORT_NAME=$(echo "${REPO_NAME}" | cut -d "-" -f3-$((1+$ref)))
+        echo "REPOSITORY_SHORT_NAME : ${REPO_SHORT_NAME}"         
+        echo "result=${REPO_SHORT_NAME}" >> "$GITHUB_OUTPUT"
+
+  # Connection tests for NDEV environment
+  NDEV-connection-test:
+    name : NDEV connection tests
+    # Depends on the Get-Repo-Name job and runs on self-hosted runner
+    needs: [Get-Repo-Name]
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment :
+      name : NDEV
+      
+    steps: 
+
+    # Checkout the source code with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth: ${Fetch_Depth}
+
+    # Setup python version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version: ${{ vars.PYTHON_VERSION }}
+    
+    # Login to Azure using service principal credentials for Non Prod
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{ env.AZURE_CREDENTIALS_NON_PROD }}
+
+    # Get databricks token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get databricks token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.AZ_DBX_KV_SECRET_KEY }} --vault-name ${{ vars.AZ_DBX_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id: dbx_secret
+
+    # Login to Storage account using service principal and upload dummy config file
+    - name : Deploy config files to azure storage using Az CLI
+      uses : azure/CLI@v1
+      with:
+        azcliversion: latest
+        inlineScript: |
+          ls
+          az login --service-principal --username ${{ env.CLINET_ID_NON_PROD }} --password ${{ env.CLINET_SECRET_NON_PROD }} --tenant ${{ env.TENANT_ID }}
+          az storage blob upload-batch --account-name ${{ vars.BLOB_STORAGE_ACCOUNT_NAME }} -d 'common' --destination-path ${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/configs -s ./configs --pattern "dummy_configs.yaml" --overwrite  --auth-mode login
+
+    # Databricks CLI setup using retrieved databricks token from AKV
+    - name: Databricks CLI setup to connect az KeyVault
+      run : |
+        python -m pip install --upgrade pip
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0" 
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{ steps.dbx_secret.outputs.dbx_token }}
+        jobs-api-version = 2.1 
+        EOF
+    
+    # Deploy notebooks to databricks workspace
+    - name: Databricks - Deploy notebooks to workspace
+      run: |
+        databricks workspace import_dir ./notebooks /Shared/GitHub/${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/notebooks --overwrite
+    
+    # Deploy ADLS DDL scripts to databricks workspace
+    - name: Databricks - Deploy DDL scripts to workspace
+      run: |
+        databricks workspace import_dir ./sql/databricks /Shared/GitHub/${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/sql/databricks --overwrite
+
+    # Azure Logout
+    - name: Azure logout
+      run: |
+        az logout
+      if: always()
+
+
+  # Connection tests for SIT environment
+  SIT-connection-test:
+    name : SIT connection tests
+    # Depends on the Get-Repo-Name job and runs on self-hosted runner
+    needs: [Get-Repo-Name]
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment : 
+      name : SIT
+      
+    steps: 
+
+    # Checkout the source code with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth: ${Fetch_Depth}
+
+    # Setup python version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version: ${{ vars.PYTHON_VERSION }}
+    
+    # Login to Azure using service principal credentials for Non Prod
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{ env.AZURE_CREDENTIALS_NON_PROD }}
+
+    # Get databricks token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get databricks token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.AZ_DBX_KV_SECRET_KEY }} --vault-name ${{ vars.AZ_DBX_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id: dbx_secret
+
+    # Get AzSQL DB connection token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get AzSQL DB connection token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.AZSQLDB_KV_SECRETKEY }} --vault-name ${{ vars.AZ_GEN_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "azsql_token=$temp" >> "$GITHUB_OUTPUT"
+      id: azsql_secret
+
+    # Get Synapse connection token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get Synapse connection token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.SYNAPSE_KV_SECRETKEY }} --vault-name ${{ vars.AZ_GEN_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+      id: synapse_secret
+    
+    # Login to Storage account using service principal and upload dummy config file
+    - name : Deploy config files to azure storage using Az CLI
+      uses : azure/CLI@v1
+      with:
+        azcliversion: latest
+        inlineScript: |
+          ls
+          az login --service-principal --username ${{ env.CLINET_ID_NON_PROD }} --password ${{ env.CLINET_SECRET_NON_PROD }} --tenant ${{ env.TENANT_ID }}
+          az storage blob upload-batch --account-name ${{ vars.BLOB_STORAGE_ACCOUNT_NAME }} -d 'common' --destination-path ${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/configs -s ./configs --pattern "dummy_configs.yaml" --overwrite  --auth-mode login
+
+    # Databricks CLI setup using retrieved databricks token from AKV
+    - name: Databricks CLI setup to connect az KeyVault
+      run : |
+        python -m pip install --upgrade pip
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0" 
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{ steps.dbx_secret.outputs.dbx_token }}
+        jobs-api-version = 2.1 
+        EOF
+    
+    # Deploy notebooks to databricks workspace
+    - name: Databricks - Deploy notebooks to workspace
+      run: |
+        databricks workspace import_dir ./notebooks /Shared/GitHub/${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/notebooks --overwrite
+    
+    # Deploy ADLS DDL scripts to databricks workspace
+    - name: Databricks - Deploy DDL scripts to workspace
+      run: |
+        databricks workspace import_dir ./sql/databricks /Shared/GitHub/${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/sql/databricks --overwrite
+
+    # Run sql script in synapse
+    - name: Synapse - Run sql script in synapse
+      uses: azure/sql-action@v2.2
+      with:        
+        connection-string: ${{ steps.synapse_secret.outputs.synapse_token }}
+        path: ./sql/synapse/dummy_synapse_sql.sql
+
+    # Run sql script in azure sqldb
+    - name: AZSQLDB - Run sql script in azure sqldb
+      uses: azure/sql-action@v2.2
+      with:        
+        connection-string: ${{ steps.azsql_secret.outputs.azsql_token }}
+        path: ./sql/azsqldb/dummy_azsqldb_sql.sql
+    
+    # Azure Logout
+    - name: Azure logout
+      run: |
+        az logout
+      if: always()
+
+  # Connection tests for PPD environment
+  PPD-connection-test:
+    name : PPD connection tests
+    # Depends on the Get-Repo-Name job and runs on self-hosted runner
+    needs: [Get-Repo-Name]
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    environment : 
+      name : PPD
+      
+    steps: 
+
+    # Checkout the source code with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth: ${Fetch_Depth}
+
+    # Setup python version
+    - name : Setup python
+      uses : actions/setup-python@v4
+      with :
+        python-version: ${{ vars.PYTHON_VERSION }}
+    
+    # Login to Azure using service principal credentials for Prod
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{ env.AZURE_CREDENTIALS_PROD }}
+
+    # Get databricks token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get databricks token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.AZ_DBX_KV_SECRET_KEY }} --vault-name ${{ vars.AZ_DBX_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "dbx_token=$temp" >> "$GITHUB_OUTPUT"
+      id: dbx_secret
+
+    # Get AzSQL DB connection token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get AzSQL DB connection token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.AZSQLDB_KV_SECRETKEY }} --vault-name ${{ vars.AZ_GEN_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "azsql_token=$temp" >> "$GITHUB_OUTPUT"
+      id: azsql_secret
+
+    # Get Synapse connection token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get Synapse connection token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.SYNAPSE_KV_SECRETKEY }} --vault-name ${{ vars.AZ_GEN_KV_SECRET_SCOPE }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "synapse_token=$temp" >> "$GITHUB_OUTPUT"
+      id: synapse_secret
+    
+    # Login to Storage account using service principal and upload dummy config file
+    - name : Deploy config files to azure storage using Az CLI
+      uses : azure/CLI@v1
+      with:
+        azcliversion: latest
+        inlineScript: |
+          ls
+          az login --service-principal --username ${{ env.CLINET_ID_PROD }} --password ${{ env.CLINET_SECRET_PROD }} --tenant ${{ env.TENANT_ID }}
+          az storage blob upload-batch --account-name ${{ vars.BLOB_STORAGE_ACCOUNT_NAME }} -d 'common' --destination-path ${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/configs -s ./configs --pattern "dummy_configs.yaml" --overwrite  --auth-mode login
+
+    # Databricks CLI setup using retrieved databricks token from AKV
+    - name: Databricks CLI setup to connect az KeyVault
+      run : |
+        python -m pip install --upgrade pip
+        pip install "databricks-cli==0.18.0" "pyjwt==2.11.0" 
+        cat > ~/.databrickscfg << EOF 
+        [DEFAULT] 
+        host = ${{ vars.DATABRICKS_HOST_URL }} 
+        token = ${{ steps.dbx_secret.outputs.dbx_token }}
+        jobs-api-version = 2.1 
+        EOF
+    
+    # Deploy notebooks to databricks workspace
+    - name: Databricks - Deploy notebooks to workspace
+      run: |
+        databricks workspace import_dir ./notebooks /Shared/GitHub/${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/notebooks --overwrite
+    
+    # Deploy ADLS DDL scripts to databricks workspace
+    - name: Databricks - Deploy DDL scripts to workspace
+      run: |
+        databricks workspace import_dir ./sql/databricks /Shared/GitHub/${{ needs.Get-Repo-Name.outputs.REPO_SHORT_NAME }}/sql/databricks --overwrite
+
+    # Run sql script in synapse
+    - name: Synapse - Run sql script in synapse
+      uses: azure/sql-action@v2.2
+      with:        
+        connection-string: ${{ steps.synapse_secret.outputs.synapse_token }}
+        path: ./sql/synapse/dummy_synapse_sql.sql
+
+    # Run sql script in azure sqldb
+    - name: AZSQLDB - Run sql script in azure sqldb
+      uses: azure/sql-action@v2.2
+      with:        
+        connection-string: ${{ steps.azsql_secret.outputs.azsql_token }}
+        path: ./sql/azsqldb/dummy_azsqldb_sql.sql
+    
+    # Azure Logout
+    - name: Azure logout
+      run: |
+        az logout
+      if: always()
+
+  # Connection tests for Vulnerability Tools
+  Vulnerability-Tools-connections:
+    name: Vulnerability Tools connections
+    # Depends on the Get-Repo-Name and Ndev Connection test job and runs on self-hosted runner
+    needs: [Get-Repo-Name,NDEV-connection-test]
+    runs-on: ${{ fromJSON(vars.RUNNER_LABEL) }}
+    steps:
+
+    # Checkout the source code with fetch depth as 2
+    - name : Checkout Source Code
+      uses : actions/checkout@v3
+      with : 
+        fetch-depth: ${Fetch_Depth}
+
+    # Login to Azure using service principal credentials for Prod
+    - name : Login to Azure
+      uses : azure/login@v1
+      with : 
+        creds : ${{ env.AZURE_CREDENTIALS_PROD }}
+  
+    # Get SNYK token from Azure KeyVault and mask before saving in GITHUB_OUTPUT
+    - name: Get SNYK token
+      run: |
+        temp=$(az keyvault secret show --name ${{ vars.SNYK_KV_SECRETKEY }} --vault-name ${{ vars.AZ_GEN_KV_SECRET_SCOPE_CENTRAL }} --query value -o tsv)
+        echo "::add-mask::$temp"
+        echo "snyk_token=$temp" >> "$GITHUB_OUTPUT"
+      id: snyk_secret
+  
+    # Snyk SCA Scanning after required files are found          
+    - name: Snyk SCA Scanning
+      working-directory: ${{ github.workspace }}
+      run: |
+        echo "----------Download Latest Snyk CLI-----------"
+        curl -Lo ./snyk "https://github.com/snyk/snyk/releases/download/v1.1159.0/snyk-linux"
+        chmod +x snyk
+        ls -lrt
+        echo "----------Authenticating Snyk-----------"
+        ./snyk auth ${{ steps.snyk_secret.outputs.snyk_token }}
+        
+        # Loop through the req.txt files and monitor them separately
+        for req_file in $(find . -name "*req*.txt"); do
+          echo "looping through all req text files"
+          req_filename=$(basename "$req_file")
+          echo "-------Requirement file name is  $req_filename ---------------"
+          project_name="${req_filename%.txt}"
+          echo "----------Project Name is $project_name--------------"
+          echo "----------Snyk Monitor for $req_filename-----------"
+          SNYK_PROJECT_NAME="${{ github.event.repository.name }}/$project_name"
+          ./snyk monitor --command=python3 --file="$req_filename" --package-manager=pip --project-name="$SNYK_PROJECT_NAME" || true
+          echo "----------Snyk Scanning for $req_filename-----------"
+          ./snyk test --command=python3 --file="$req_filename" --package-manager=pip || true
+          echo "-----------Snyk Scanning Complete for $req_filename-----------"
+        done

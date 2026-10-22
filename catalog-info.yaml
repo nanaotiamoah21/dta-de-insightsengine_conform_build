@@ -1,0 +1,13 @@
+apiVersion: backstage.io/v1beta1
+kind: Component
+metadata:
+  name: dta-de-sst_template_repo
+  title: Data & AI Repo - sst template repo
+  description: dta-de-sst_template_repo
+  annotations:
+    github.com/project-slug: DigitalInnovation/dta-de-sst_template_repo
+spec:
+  type: pipelines
+  lifecycle: production
+  system: ap-A3024
+  owner: tn-data

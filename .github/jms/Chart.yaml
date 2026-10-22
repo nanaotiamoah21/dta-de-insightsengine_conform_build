@@ -1,0 +1,10 @@
+apiVersion: v1
+name: jmsbridge
+version: 1.0.1
+description: A Sample application deployment
+home: https://github.com/DigitalInnovation/kubernetes-deployment
+sources:
+  - https://github.com/DigitalInnovation/kubernetes-deployment
+maintainers:
+  - name: M&S Platform Team
+    email: grp-platform-technologies@mnscorp.onmicrosoft.com
