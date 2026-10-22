@@ -1,0 +1,10 @@
+tables:
+  - name: customerfeedbacksurvey
+    dest_table_name: customerfeedbacksurvey_saz_tbl
+    active: true
+    table_sensitivity: hs
+    sensitive_columns:
+      - column: sourceSystemRecordID
+        data_type: string
+        tag_value: highly sensitive
+

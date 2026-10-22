@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # DBTITLE 1,Notebook Title
 # MAGIC %md
 # MAGIC # customernumericfeedbackrating_conform
@@ -71,6 +75,18 @@ print(db_tgt, db_src, tgt_table, parent_table, src_table, source_system_id)
 
 # COMMAND ----------
 
+# DBTITLE 1,derive load window
+from datetime import timedelta
+
+lookback_days = 0
+
+max_feedback_date = spark.sql(f'''SELECT max(to_date(effectiveFromDate)) FROM {tgt_table}''').first()[0]
+load_from_date = '1900-01-01' if max_feedback_date is None else str(max_feedback_date - timedelta(days=lookback_days))
+
+print(f'max feedbackDate in target: {max_feedback_date} | reading source responses from: {load_from_date}')
+
+# COMMAND ----------
+
 # DBTITLE 1,customernumericfeedbackrating_stg
 spark.sql(f'''
 select
@@ -80,7 +96,7 @@ ratingName,
 ratingValue,
 from_utc_timestamp(now(),'Europe/London') createdTimestamp,
 cast(null as timestamp) modifiedTimestamp,
-from_utc_timestamp(now(),'Europe/London') effectiveFromDate,
+effectiveFromDate,
 cast('2999-12-31 00:00:00' as timestamp) effectiveToDate,
 cast(null as timestamp) logicalDeletionTimestamp,
 sourceSystemID
@@ -91,9 +107,11 @@ md5(concat_ws('|', '{src_table_name}', nvl(a.SURVEY_ID,''), nvl(a.CODE_C_STORE_N
 r.ratingName,
 cast(r.ratingValue as int) ratingValue,
 cast({source_system_id} as int) sourceSystemID,
+cast(a.LOAD_TIMESTAMP as timestamp) effectiveFromDate,
 row_number() over (partition by md5(concat_ws('|', '{src_table_name}', nvl(a.SURVEY_ID,''), nvl(a.CODE_C_STORE_NUMBER,''), r.ratingName))
                    order by to_timestamp(a.RESPONSE_DATE,'yyyy-MM-dd HH:mm:ss') desc) row1
 from {src_table} a
+where to_date(to_timestamp(a.LOAD_TIMESTAMP,'yyyy-MM-dd HH:mm:ss')) > '{load_from_date}'
 lateral view stack(3,
   'Colleague Service', a.COLLEAGUE_SERVICE,
   'Clean and Tidy',    a.CLEAN_AND_TIDY,
@@ -129,21 +147,6 @@ try:
     merge into {tgt_table} as dst
     using customernumericfeedbackrating_stg src
     on dst.custNumericFeedbackRatingID = src.custNumericFeedbackRatingID and year(dst.effectiveToDate)=2999
-
-    when matched and (
-    trim(nvl(dst.custFeedbackID,'')) != trim(nvl(src.custFeedbackID,''))
-    or trim(nvl(dst.ratingName,'')) != trim(nvl(src.ratingName,''))
-    or nvl(dst.ratingValue,0) != nvl(src.ratingValue,0)
-    or nvl(dst.sourceSystemID,0) != nvl(src.sourceSystemID,0)
-    ) then
-
-    update set
-    dst.custFeedbackID = src.custFeedbackID,
-    dst.ratingName = src.ratingName,
-    dst.ratingValue = src.ratingValue,
-    dst.sourceSystemID = src.sourceSystemID,
-    dst.modifiedTimestamp = from_utc_timestamp(now(),'Europe/London')
-
     when not matched then
     insert (dst.custNumericFeedbackRatingID,
     dst.custFeedbackID,

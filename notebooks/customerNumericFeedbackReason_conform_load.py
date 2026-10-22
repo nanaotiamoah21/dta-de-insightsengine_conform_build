@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # DBTITLE 1,Notebook Title
 # MAGIC %md
 # MAGIC # customernumericfeedbackreason_conform

@@ -1,0 +1,135 @@
+environments:
+  lab:
+    source:
+      catalog: beam_explore
+      schema: insightsengine
+    destination:
+      catalog: beam_explore
+      schema: insightsengine
+    ad_groups:
+      sensitive: None
+      highly_sensitive: None
+      non_sensitive: None
+      ops: None
+    policy_mask_s_exception:
+      - None
+    policy_mask_s_inclusion:
+      - None
+    policy_mask_hs_exception:
+      - None
+    policy_mask_hs_inclusion:
+      - account users
+    policy_mask_sc_exception:
+      - None
+    policy_mask_sc_inclusion:
+      - None
+
+  # ndev:
+  #   source:
+  #     catalog: beam_ndev
+  #     schema: medallia_ingest_ndev
+  #   destination:
+  #     catalog: beam_ndev
+  #     schema: medallia_ingest_ndev
+  #   ad_groups:
+  #     sensitive: None
+  #     highly_sensitive: None
+  #     non_sensitive: None
+  #     ops: None
+  #   policy_mask_s_exception:
+  #     - None
+  #   policy_mask_s_inclusion:
+  #     - None
+  #   policy_mask_hs_exception:
+  #     - a834b0ad-9058-418c-bfab-ca7972aadb50
+  #     - sanjoy.kayal1@mnscorp.net
+  #     - IT APP AZ DTA Ops
+  #   policy_mask_hs_inclusion:
+  #     - account users
+  #   policy_mask_sc_exception:
+  #     - None
+  #   policy_mask_sc_inclusion:
+  #     - None
+
+  # sit:
+  #   source:
+  #     catalog: beam_sit
+  #     schema: medallia_ingest_sit
+  #   destination:
+  #     catalog: beam_sit
+  #     schema: medallia_ingest_sit
+  #   ad_groups:
+  #     sensitive: None
+  #     highly_sensitive: None
+  #     non_sensitive: None
+  #     ops: None
+  #   policy_mask_s_exception:
+  #     - None
+  #   policy_mask_s_inclusion:
+  #     - None
+  #   policy_mask_hs_exception:
+  #     - a834b0ad-9058-418c-bfab-ca7972aadb50
+  #     - saifur.rahaman1@mnscorp.net
+  #     - IT APP AZ DTA Ops
+  #   policy_mask_hs_inclusion:
+  #     - account users
+  #   policy_mask_sc_exception:
+  #     - None
+  #   policy_mask_sc_inclusion:
+  #     - None
+
+  # ppd:
+  #   source:
+  #     catalog: beam_ppd
+  #     schema: medallia_ingest_ppd
+  #   destination:
+  #     catalog: beam_ppd
+  #     schema: medallia_ingest_ppd
+  #   ad_groups:
+  #     sensitive: None
+  #     highly_sensitive: None
+  #     non_sensitive: None
+  #     ops: IT APP AZ DTA Ops
+  #   policy_mask_s_exception:
+  #     - None
+  #   policy_mask_s_inclusion:
+  #     - None
+  #   policy_mask_hs_exception:
+  #     - 89f6cfec-b9bd-40af-8f9a-520bc0146d77
+  #     - IT APP AZ DTA D medallia_ingest_prod hs R Exclusion
+  #     - IT APP AZ DTA Ops
+  #     - b9bbe272-cd39-4d25-a09d-1eb2c99757ec
+  #   policy_mask_hs_inclusion:
+  #     - account users
+  #   policy_mask_sc_exception:
+  #     - None
+  #   policy_mask_sc_inclusion:
+  #     - None
+
+  # prod:
+  #   source:
+  #     catalog: beam_prod
+  #     schema: medallia_ingest_prod
+  #   destination:
+  #     catalog: beam_prod
+  #     schema: medallia_ingest_prod
+  #   ad_groups:
+  #     sensitive: None
+  #     highly_sensitive: None
+  #     non_sensitive: None
+  #     ops: IT APP AZ DTA Ops
+  #   policy_mask_s_exception:
+  #     - None
+  #   policy_mask_s_inclusion:
+  #     - None
+  #   policy_mask_hs_exception:
+  #     - 89f6cfec-b9bd-40af-8f9a-520bc0146d77
+  #     - IT APP AZ DTA D medallia_ingest_prod hs R Exclusion
+  #     - IT APP AZ DTA Ops
+  #     - b9bbe272-cd39-4d25-a09d-1eb2c99757ec
+  #   policy_mask_hs_inclusion:
+  #     - account users
+  #   policy_mask_sc_exception:
+  #     - None
+  #   policy_mask_sc_inclusion:
+  #     - None

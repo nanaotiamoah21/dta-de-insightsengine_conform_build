@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # DBTITLE 1,Notebook Title
 # MAGIC %md
 # MAGIC # customerfeedbacksurvey_conform
@@ -31,9 +35,10 @@
 # MAGIC ## Code Navigator
 # MAGIC <ol>
 # MAGIC <li>Import Libraries and Declare Variables</li>
-# MAGIC <li>Create staging view from medallia_survey_voc (column mapping, surrogate key, de-duplication)</li>
-# MAGIC <li>Validate surrogate key</li>
-# MAGIC <li>Upsert (merge) staging view into target table</li>
+# MAGIC <li>Derive load window (latest feedbackDate in target minus lookback days)</li>
+# MAGIC <li>Create staging view from medallia_survey_voc for the load window (column mapping, surrogate key, de-duplication)</li>
+# MAGIC <li>Validate surrogate key and count new keys to insert</li>
+# MAGIC <li>Insert-only merge on custFeedbackID (no updates - survey responses never change after submission)</li>
 # MAGIC <li>Post-load checks</li>
 # MAGIC <li>Optimize and Vacuum target table</li>
 # MAGIC </ol>
@@ -63,10 +68,22 @@ tgt_table = f'{db_tgt}.customerfeedbacksurvey_saz_tbl'
 src_table = f'{db_src}.medallia_survey_voc'
 src_table_name = 'medallia_survey_voc'   # ingest table name used in surrogate key and campaignName
 
-# Source System ID - needs to be created; set the agreed value here (NULL until then)
+# Source System ID - needs to be created; set the agreed value here (200 until then)
 source_system_id = 200
 
 print(db_tgt, db_src, tgt_table, src_table, source_system_id)
+
+# COMMAND ----------
+
+# DBTITLE 1,derive load window
+from datetime import timedelta
+
+lookback_days = 0
+
+max_feedback_date = spark.sql(f'''SELECT max(to_date(effectiveFromDate)) FROM {tgt_table}''').first()[0]
+load_from_date = '1900-01-01' if max_feedback_date is None else str(max_feedback_date - timedelta(days=lookback_days))
+
+print(f'max feedbackDate in target: {max_feedback_date} | reading source responses from: {load_from_date}')
 
 # COMMAND ----------
 
@@ -79,7 +96,7 @@ storeNumber,
 campaignName,
 from_utc_timestamp(now(),'Europe/London') createdTimestamp,
 cast(null as timestamp) modifiedTimestamp,
-from_utc_timestamp(now(),'Europe/London') effectiveFromDate,
+effectiveFromDate,
 cast('2999-12-31 00:00:00' as timestamp) effectiveToDate,
 cast(null as timestamp) logicalDeletionTimestamp,
 sourceSystemID,
@@ -92,9 +109,11 @@ a.CODE_C_STORE_NUMBER storeNumber,
 case when a.SURVEY_CHANNEL is null then '{src_table_name}' else concat('{src_table_name}',' - ',a.SURVEY_CHANNEL) end campaignName,
 cast({source_system_id} as int) sourceSystemID,
 a.SURVEY_ID sourceSystemRecordID,
+cast(a.LOAD_TIMESTAMP as timestamp) effectiveFromDate,
 row_number() over (partition by md5(concat_ws('|', '{src_table_name}', nvl(a.SURVEY_ID,''), nvl(a.CODE_C_STORE_NUMBER,'')))
                    order by to_timestamp(a.RESPONSE_DATE,'yyyy-MM-dd HH:mm:ss') desc) row1
 from {src_table} a
+where to_date(to_timestamp(a.LOAD_TIMESTAMP,'yyyy-MM-dd HH:mm:ss')) > '{load_from_date}'
 ) a1 where a1.row1=1
 ''').createOrReplaceTempView("customerfeedbacksurvey_stg")
 
@@ -103,11 +122,15 @@ display(spark.table('customerfeedbacksurvey_stg').limit(5))
 # COMMAND ----------
 
 # DBTITLE 1,validate surrogate key
-# Source rows vs distinct surrogate keys - a big gap means rows are collapsing onto the same key
+# Source rows in the load window vs distinct surrogate keys - a big gap means rows are collapsing onto the same key
+# new_keys_to_insert = staged keys not yet in the conform table (what the insert-only merge will add)
 display(spark.sql(f"""
 SELECT
-  (SELECT count(*) FROM {src_table})                   AS source_rows,
+  (SELECT count(*) FROM {src_table}
+   WHERE to_date(to_timestamp(RESPONSE_DATE,'yyyy-MM-dd HH:mm:ss')) >= '{load_from_date}') AS source_rows_in_window,
   (SELECT count(*) FROM customerfeedbacksurvey_stg)    AS staged_rows_distinct_key,
+  (SELECT count(*) FROM customerfeedbacksurvey_stg s
+   WHERE NOT EXISTS (SELECT 1 FROM {tgt_table} t WHERE t.custFeedbackID = s.custFeedbackID)) AS new_keys_to_insert,
   (SELECT count(DISTINCT SURVEY_ID) FROM {src_table})  AS distinct_survey_id
 """))
 
@@ -120,28 +143,15 @@ SELECT
 # COMMAND ----------
 
 # DBTITLE 1,Upsert operation on customerfeedbacksurvey_saz_tbl
+# Insert-only load into customerfeedbacksurvey_saz_tbl, keyed on custFeedbackID.
+# Survey responses never change after submission, so there is no WHEN MATCHED / update branch -
+# only responses that do not already exist in the conform layer are inserted.
 
 try:
     spark.sql(f"""
     merge into {tgt_table} as dst
     using customerfeedbacksurvey_stg src
     on dst.custFeedbackID = src.custFeedbackID and year(dst.effectiveToDate)=2999
-
-    when matched and (
-    nvl(dst.feedbackDate,'1900-01-01') != nvl(src.feedbackDate,'1900-01-01')
-    or trim(nvl(dst.storeNumber,'')) != trim(nvl(src.storeNumber,''))
-    or trim(nvl(dst.campaignName,'')) != trim(nvl(src.campaignName,''))
-    or nvl(dst.sourceSystemID,0) != nvl(src.sourceSystemID,0)
-    or trim(nvl(dst.sourceSystemRecordID,'')) != trim(nvl(src.sourceSystemRecordID,''))
-    ) then
-
-    update set
-    dst.feedbackDate = src.feedbackDate,
-    dst.storeNumber = src.storeNumber,
-    dst.campaignName = src.campaignName,
-    dst.sourceSystemID = src.sourceSystemID,
-    dst.sourceSystemRecordID = src.sourceSystemRecordID,
-    dst.modifiedTimestamp = from_utc_timestamp(now(),'Europe/London')
 
     when not matched then
     insert (dst.custFeedbackID,
@@ -165,7 +175,8 @@ try:
     src.effectiveToDate,
     src.logicalDeletionTimestamp,
     src.sourceSystemID,
-    src.sourceSystemRecordID)
+    src.sourceSystemRecordID
+    )
     """).display()
 except Exception as e:
     print("An error occurred: ",e)
@@ -193,3 +204,7 @@ spark.sql(f'''OPTIMIZE {tgt_table}''')
 
 # DBTITLE 1,Vacuum Tables
 spark.sql(f'''VACUUM {tgt_table}''')
+
+# COMMAND ----------
+
+spark.sql(f'select * from {tgt_table}').display(6)
