@@ -1,7 +1,7 @@
 # Databricks notebook source
 # DBTITLE 1,Notebook Title
 # MAGIC %md
-# MAGIC # customernumericfeedbackrating_analytics
+# MAGIC # customernumericfeedbackrating_conform
 # MAGIC | Detail Tag | Information |
 # MAGIC |------------|-------------|
 # MAGIC | Domain | Customer |

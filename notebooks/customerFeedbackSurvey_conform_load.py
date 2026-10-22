@@ -1,7 +1,7 @@
 # Databricks notebook source
 # DBTITLE 1,Notebook Title
 # MAGIC %md
-# MAGIC # customerfeedbacksurvey_analytics
+# MAGIC # customerfeedbacksurvey_conform
 # MAGIC | Detail Tag | Information |
 # MAGIC |------------|-------------|
 # MAGIC | Domain | Customer |
@@ -10,7 +10,7 @@
 # MAGIC | Input Datasets |<ul><li> medallia_ingest_prod.medallia_survey_voc </li></ul>|
 # MAGIC | Output Datasets | <ul><li> insightsengine.customerfeedbacksurvey_saz_tbl (lab: beam_explore) </li></ul> |
 # MAGIC | Input Data Name | Ingest |
-# MAGIC | Output Data Name | Analytics |
+# MAGIC | Output Data Name | Conform |
 # MAGIC | Input Data Type | Delta |
 # MAGIC | Output Data Type | Delta |
 # MAGIC | Airflow Dag Name | TBC |
@@ -120,8 +120,6 @@ SELECT
 # COMMAND ----------
 
 # DBTITLE 1,Upsert operation on customerfeedbacksurvey_saz_tbl
-# Performing upsert operation on customerfeedbacksurvey_saz_tbl to make sure new records are inserted and records for which there are updates get updated.
-# customerfeedbacksurvey_saz_tbl is a type1 table.
 
 try:
     spark.sql(f"""

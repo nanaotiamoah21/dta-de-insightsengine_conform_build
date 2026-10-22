@@ -1,7 +1,7 @@
 # Databricks notebook source
 # DBTITLE 1,Notebook Title
 # MAGIC %md
-# MAGIC # customernumericfeedbackreason_analytics
+# MAGIC # customernumericfeedbackreason_conform
 # MAGIC | Detail Tag | Information |
 # MAGIC |------------|-------------|
 # MAGIC | Domain | Customer |
@@ -10,7 +10,7 @@
 # MAGIC | Input Datasets |<ul><li> medallia_ingest_prod.medallia_survey_voc </li></ul>|
 # MAGIC | Output Datasets | <ul><li> insightsengine.customernumericfeedbackreason_saz_tbl (lab: beam_explore) </li></ul> |
 # MAGIC | Input Data Name | Ingest |
-# MAGIC | Output Data Name | Analytics |
+# MAGIC | Output Data Name | Conform |
 # MAGIC | Input Data Type | Delta |
 # MAGIC | Output Data Type | Delta |
 # MAGIC | Airflow Dag Name | TBC |
